@@ -1,0 +1,7 @@
+out/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.asm
+*.pgm

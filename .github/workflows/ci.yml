@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  linux-gcc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run unit tests
+        run: |
+          gcc -std=c17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
+              src/*.c tests/test_all.c -o test_all -lm
+          ./test_all
+      - name: Sanitised build
+        run: |
+          gcc -std=c17 -g -Wall -Wextra -Iinclude \
+              -fsanitize=address,undefined \
+              src/*.c tests/test_all.c -o test_asan -lm
+          ./test_asan
+      - name: Channel synthesis check
+        run: |
+          gcc -std=c17 -O2 -Iinclude src/*.c apps/ch_probe.c -o ch_probe -lm
+          ./ch_probe 30
