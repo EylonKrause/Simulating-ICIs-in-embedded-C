@@ -53,8 +53,12 @@ long long bias_t = 0, bias_r = 0;
     long nops = 0;
     for (int i = -30000; i < 30000; i += 7) {
         const int32_t exact = (int32_t)i * 21845;                 /* Q1.30 */
-        bias_t += ((long long)q15_mul_trunc((q15_t)i, 21845) << Q15_FRAC) - exact;
-        bias_r += ((long long)q15_mul((q15_t)i, 21845) << Q15_FRAC) - exact;
+        /* MULTIPLY, do not shift. Left-shifting a NEGATIVE signed value is
+         * undefined behaviour in C -- these products are routinely negative.
+         * MSVC compiled it silently; UBSan caught it on the first run. Same
+         * family as 1 << 31 on a signed int. */
+        bias_t += (long long)q15_mul_trunc((q15_t)i, 21845) * (1LL << Q15_FRAC) - exact;
+        bias_r += (long long)q15_mul((q15_t)i, 21845) * (1LL << Q15_FRAC) - exact;
         nops++;
     }
     /* Measure the ERROR against the exact product, not the result -- summing
