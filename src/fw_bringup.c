@@ -29,13 +29,16 @@
 
 #include <string.h>
 
+/* Convergence may not be declared before this much training has elapsed. */
+#define EQ_MIN_TRAIN_MS  150u
+
 /* Per-state timeout, milliseconds. A table, not scattered constants. */
 static const uint32_t STATE_TIMEOUT_MS[LS_COUNT] = {
     [LS_RESET]       =    2u,
     [LS_WAIT_SIGNAL] =  200u,
     [LS_AGC]         =  120u,
     [LS_CDR_LOCK]    =  300u,
-    [LS_EQ_TRAIN]    =  400u,
+    [LS_EQ_TRAIN]    =  600u,
     [LS_TRACK]       =  200u,
     [LS_UP]          =    0u,     /* 0 == no timeout; steady state */
     [LS_FAULT]       = 1000u,
@@ -118,7 +121,7 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
     case LS_WAIT_SIGNAL:
         if ((st & STAT_SIGDET) != 0u) {
             hal_critical_enter();
-            hal_field_set(REG_ADAPT_CTRL, ADAPT_AGC_EN, 0u, 1u);
+            hal_bit_write(REG_ADAPT_CTRL, ADAPT_AGC_EN, true);
             hal_critical_exit();
             enter(L, LS_AGC);
         } else if (expired) {
@@ -133,17 +136,29 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
         L->tm.agc_updates++;
         if (fw_agc_step()) {
             hw_status_set(STAT_AGC_CONV);
-            /* CDR only. The equaliser stays frozen at its centre spike.
+            /* Enable the CDR AND the equaliser together.
              *
-             * MEASURED, not assumed: enabling tap adaptation concurrently with
-             * CDR acquisition stopped the CDR locking at all -- the taps moved
-             * the signal underneath the loop faster than it could track, and
-             * the phase slewed past lock forever. With the taps frozen the
-             * same loop acquires 120 ppm in a few blocks. This is what "the
-             * loops fight each other" looks like when you actually run it,
-             * and it is why bring-up sequences rather than parallelises. */
+             * A Mueller-Muller TED balances the first pre- and post-cursor, so
+             * on a MINIMUM-PHASE channel -- precursor near zero, postcursor
+             * large -- its S-curve carries a DC offset until the equaliser has
+             * made the pulse response roughly symmetric about the cursor.
+             * Frozen taps therefore mean a permanently biased TED and an
+             * integrator that winds up rather than settles.
+             *
+             * So these two must converge JOINTLY. What keeps them from
+             * fighting is bandwidth, not ordering: the CDR closes every symbol
+             * at 100 GBd while the taps update once per block at kHz, five
+             * orders of magnitude apart. */
+            /* Step size, sized from the numbers rather than guessed: the gradient
+             * accumulates to ~500 per block, and TAP_APPLY_SHIFT is 14, so the
+             * accumulator needs 16384 to move ONE applied tap code. At
+             * mu_shift 8 that is 16384 blocks per code -- the link would come
+             * "up" with the taps untouched, which is exactly what happened. */
+            fw_adapt_set_gear(1u, 0u);
             hal_critical_enter();
-            hal_field_set(REG_ADAPT_CTRL, ADAPT_CDR_EN, 0u, 1u);
+            hal_bit_write(REG_ADAPT_CTRL, ADAPT_CDR_EN, true);
+            hal_bit_write(REG_ADAPT_CTRL, ADAPT_FFE_EN, true);
+            hal_bit_write(REG_ADAPT_CTRL, ADAPT_DFE_EN, true);
             hal_critical_exit();
             enter(L, LS_CDR_LOCK);
         } else if (expired) {
@@ -161,13 +176,8 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
          * the signal amplitude moved with it, and because TED gain scales
          * with amplitude the CDR was being detuned while trying to lock.
          * Exactly one loop adapts at a time during bring-up. */
+        (void)fw_adapt_step();        /* taps open the eye the CDR needs */
         if ((st & STAT_CDR_LOCK) != 0u) {
-            /* Lock held. NOW release the equaliser, with a coarse step. */
-            fw_adapt_set_gear(4u, 0u);
-            hal_critical_enter();
-            hal_field_set(REG_ADAPT_CTRL, ADAPT_FFE_EN, 0u, 1u);
-            hal_field_set(REG_ADAPT_CTRL, ADAPT_DFE_EN, 0u, 1u);
-            hal_critical_exit();
             enter(L, LS_EQ_TRAIN);
         } else if (expired) {
             L->tm.timeouts[LS_CDR_LOCK]++;
@@ -177,10 +187,17 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
 
     case LS_EQ_TRAIN:
         L->tm.tap_updates++;
-        if (fw_adapt_step()) {
+        /* MINIMUM TRAINING TIME. A "settled" test alone is not enough: early
+         * in training the taps are barely moving simply because they have not
+         * started, and a quiet-taps detector cannot tell that apart from
+         * genuine convergence. Real link-training specs mandate a minimum
+         * duration for the same reason. Do not accept convergence before the
+         * loop has had time to act. */
+        if (fw_adapt_step() &&
+            fw_deadline_passed(L->entered_ms, now_ms, EQ_MIN_TRAIN_MS)) {
             /* Shift down a gear for tracking: finer step, leakage on to stop
              * the taps drifting when the gradient stops being informative. */
-            fw_adapt_set_gear(8u, 12u);
+            fw_adapt_set_gear(4u, 14u);   /* tracking: finer step, leakage on */
             enter(L, LS_TRACK);
         } else if (expired) {
             L->tm.timeouts[LS_EQ_TRAIN]++;
@@ -202,12 +219,18 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
         break;
 
     case LS_UP:
-        /* Steady state: keep tracking PVT drift, and harvest telemetry.
-         * These counters are RO/W1C, so read-and-clear leaves them armed. */
+        /* Steady state: harvest telemetry, THEN keep the loops tracking.
+         *
+         * Order matters. A read-and-clear register can have exactly ONE
+         * consumer: fw_agc_step() also drains REG_SYM_CNT for its average, so
+         * reading telemetry after it returned zero symbols and zero errors
+         * forever. Either read it first, or give each consumer its own
+         * counter. Shared read-clear state is a design smell in a register
+         * map for precisely this reason. */
+        L->tm.symbols    += hal_read32(REG_SYM_CNT);
+        L->tm.bit_errors += hal_read_clear(REG_ERR_CNT);
         (void)fw_agc_step();
         (void)fw_adapt_step();
-        L->tm.symbols    += hal_read_clear(REG_SYM_CNT);
-        L->tm.bit_errors += hal_read_clear(REG_ERR_CNT);
         if ((st & STAT_CDR_LOCK) == 0u) {
             enter(L, LS_FAULT);                 /* lost lock */
         }
@@ -231,5 +254,8 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
         break;
     }
 }
+
+
+
 
 

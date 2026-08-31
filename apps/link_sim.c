@@ -62,6 +62,7 @@ int main(int argc, char **argv)
             printf("        .. t=%4u %-11s phase %6.2f mean(e) %+8.5f lock %4u ppm %+7.1f\n",
                    t, fw_state_name(fw.state), hw.cdr.phase, hw.cdr.ted_avg,
                    hw.cdr.lock_count, cdr_ppm(&hw.cdr));
+            printf("           adapt activity %d\n", fw_adapt_activity());
         }
         if (fw.state != last) {
             printf("  %5u  %-12s %-4u %-4u %-6u  %s\n", t, fw_state_name(fw.state),

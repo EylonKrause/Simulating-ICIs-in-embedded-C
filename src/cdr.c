@@ -9,6 +9,12 @@
 #define LOCK_THRESHOLD   0.02     /* |mean(e)| below this counts as locked */
 #define LOCK_DWELL       2000u    /* consecutive symbols required      */
 
+/* Anti-windup limit, in samples of phase advance per symbol. 1000 ppm is far
+ * beyond any real reference mismatch (specs are tens to low hundreds), so this
+ * bounds the integrator without constraining legitimate tracking. */
+#define CDR_PPM_LIMIT    1000.0
+#define CDR_INTEG_MAX    (CDR_PPM_LIMIT * 1e-6 * (double)OSR)
+
 void cdr_init(cdr_t *c, double kp, double ki)
 {
     memset(c, 0, sizeof(*c));
@@ -39,9 +45,21 @@ real_t cdr_sample(const cdr_t *c, const real_t *osr_buf, size_t nsamples, size_t
 
 void cdr_update(cdr_t *c, real_t y, real_t decision_level)
 {
-    /* Mueller-Muller timing error detector. */
-    double e = (double)c->a_prev * (double)y
-             - (double)decision_level * (double)c->y_prev;
+    /* Mueller-Muller timing error detector:
+     *
+     *      e[n] = a[n] * y[n-1]  -  a[n-1] * y[n]
+     *
+     * SIGN MATTERS, AND IT IS EASY TO INVERT. Written the other way round the
+     * loop becomes positive feedback: it drives the phase AWAY from the null,
+     * the error never crosses zero, and the integrator walks to its limit
+     * while the phase error stays stubbornly one-signed.
+     *
+     * That pattern is the fingerprint. A small CONSTANT mean(e) alongside a
+     * monotonically running integrator means the SIGN is wrong -- it does not
+     * mean the gains need tuning. I spent a long time tuning gains against
+     * this before checking the sign. */
+    double e = (double)decision_level * (double)c->y_prev
+             - (double)c->a_prev * (double)y;
 
     /* NORMALISE BY AMPLITUDE. The raw TED output scales with signal level, so
      * the loop gain would otherwise depend on whatever the AGC happened to
@@ -54,8 +72,18 @@ void cdr_update(cdr_t *c, real_t y, real_t decision_level)
     c->amp_slow += 0.001 * (fabs((double)y) - c->amp_slow);
     e /= (c->amp_slow * c->amp_slow + 0.55);
 
-    /* Type-2 PI loop filter. */
+    /* Type-2 PI loop filter, with ANTI-WINDUP on the integrator.
+     *
+     * The clamp is not optional. Any residual DC in the TED -- and Mueller-
+     * Muller has plenty of it until the equaliser has made the pulse response
+     * roughly symmetric about the cursor -- drives an unclamped integrator
+     * without bound. Observed here: the frequency estimate ran to -156000 ppm
+     * while the phase error stayed small, which is the classic windup
+     * signature. Clamping to a physically possible frequency offset keeps the
+     * loop recoverable instead of latched. */
     c->integ += c->ki * e;
+    if (c->integ >  CDR_INTEG_MAX) { c->integ =  CDR_INTEG_MAX; }
+    if (c->integ < -CDR_INTEG_MAX) { c->integ = -CDR_INTEG_MAX; }
     c->phase += c->kp * e + c->integ;
 
     /* Keep the phase inside one UI. Wrapping is not cosmetic -- it is how a

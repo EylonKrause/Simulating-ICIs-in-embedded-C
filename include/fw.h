@@ -86,6 +86,7 @@ void fw_adapt_set_gear(unsigned mu_shift, unsigned leak_shift);
 int  fw_adapt_step(void);               /* 1 when the taps have settled      */
 int  fw_adapt_converged(void);
 int32_t fw_adapt_tap(unsigned i);       /* accumulator value, for tests      */
+int32_t fw_adapt_activity(void);        /* last block's summed |gradient|      */
 
 /* ---- the one timing rule that matters ----------------------------------- */
 /* Unsigned subtraction is correct ACROSS THE WRAP of the millisecond counter;

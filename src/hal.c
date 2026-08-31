@@ -103,6 +103,19 @@ void hal_field_set(uint32_t off, uint32_t mask, unsigned shift, uint32_t val)
     hal_write32(off, nxt);
 }
 
+void hal_bit_write(uint32_t off, uint32_t bitmask, bool on)
+{
+    g_stats.rmw++;
+    if (g_crit_depth == 0u) {
+        g_stats.unguarded_rmw++;
+    }
+    if (g_w1c_map[idx_of(off)] != 0u) {
+        g_stats.w1c_rmw_bugs++;
+    }
+    const uint32_t cur = hal_read32(off);
+    hal_write32(off, on ? (cur | bitmask) : (cur & ~bitmask));
+}
+
 void hal_w1c(uint32_t off, uint32_t bits)
 {
     /* No read. Write only the bits being acknowledged. */

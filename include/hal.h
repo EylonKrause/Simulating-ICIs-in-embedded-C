@@ -102,6 +102,14 @@ void     hal_write32(uint32_t off, uint32_t val);
 void     hal_field_set(uint32_t off, uint32_t mask, unsigned shift, uint32_t val);
 uint32_t hal_field_get(uint32_t off, uint32_t mask, unsigned shift);
 
+/* Set or clear whole bits by MASK, with no shift argument to get wrong.
+ *
+ * hal_field_set(reg, ADAPT_CDR_EN, 0, 1) is a bug: the field helper computes
+ * (val << shift) & mask, so a value of 1 with shift 0 against a mask of
+ * (1<<1) evaluates to 0 and the bit is never set. Single-bit controls take
+ * this function instead -- there is no shift to supply and none to mismatch. */
+void     hal_bit_write(uint32_t off, uint32_t bitmask, bool on);
+
 /* Write-1-to-clear. Writes ONLY the named bits; never reads first. */
 void     hal_w1c(uint32_t off, uint32_t bits);
 
