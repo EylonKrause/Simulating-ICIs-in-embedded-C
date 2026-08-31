@@ -35,7 +35,6 @@
 static int32_t  g_target = AGC_TARGET_Q12;
 static int32_t  g_vga_bias;
 static unsigned g_settled;
-static int      g_last_err;
 
 void fw_agc_set_target(unsigned attempt)
 {
@@ -54,7 +53,6 @@ int32_t fw_agc_target(void) { return g_target; }
 void fw_agc_reset(void)
 {
     g_settled  = 0u;
-    g_last_err = 0;
     hal_critical_enter();
     hal_field_set(REG_AFE_VGA, VGA_GAIN_MASK, VGA_GAIN_SHIFT,
                   (uint32_t)sat_to((int32_t)(VGA_GAIN_CODES / 2u) + g_vga_bias, 0, (int32_t)VGA_GAIN_CODES - 1));
@@ -79,7 +77,6 @@ int fw_agc_step(void)
 
     const int32_t mean = (int32_t)(amp / n);
     const int32_t err  = g_target - mean;   /* g_vga_bias shifts where we start */
-    g_last_err = (int)err;
 
     if (err > -AGC_DEADBAND_Q12 && err < AGC_DEADBAND_Q12) {
         if (g_settled < AGC_SETTLE_BLOCKS) {

@@ -1,0 +1,6 @@
+# Keep sources LF everywhere so they build identically on Linux, macOS and
+# Windows. Only the Windows batch file needs CRLF.
+* text=auto eol=lf
+*.bat  text eol=crlf
+*.sh   text eol=lf
+*.pgm  binary

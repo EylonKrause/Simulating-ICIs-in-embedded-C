@@ -2,26 +2,79 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
   pull_request:
+  workflow_dispatch:
+
+# The project has NO external dependencies -- only the C standard library and
+# libm -- so none of these jobs installs anything. If a job fails, it is the
+# code, not the environment.
 
 jobs:
-  linux-gcc:
+  unix:
+    name: ${{ matrix.os }} / ${{ matrix.cc }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  cc: gcc }
+          - { os: ubuntu-latest,  cc: clang }
+          - { os: macos-latest,   cc: clang }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler version
+        run: ${{ matrix.cc }} --version
+
+      - name: Build (make)
+        run: make CC=${{ matrix.cc }}
+
+      - name: Unit tests
+        run: make CC=${{ matrix.cc }} test
+
+      - name: Channel synthesis check
+        run: ./out/ch_probe 30
+
+      - name: CDR loop check
+        run: ./out/cdr_probe 20 120 12 0 0 36
+
+      - name: build.sh works too
+        run: |
+          chmod +x build.sh
+          CC=${{ matrix.cc }} ./build.sh test_all
+
+  sanitizers:
+    name: ubuntu / asan + ubsan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build and run unit tests
-        run: |
-          gcc -std=c17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
-              src/*.c tests/test_all.c -o test_all -lm
-          ./test_all
-      - name: Sanitised build
-        run: |
-          gcc -std=c17 -g -Wall -Wextra -Iinclude \
-              -fsanitize=address,undefined \
-              src/*.c tests/test_all.c -o test_asan -lm
-          ./test_asan
-      - name: Channel synthesis check
-        run: |
-          gcc -std=c17 -O2 -Iinclude src/*.c apps/ch_probe.c -o ch_probe -lm
-          ./ch_probe 30
+      - name: AddressSanitizer + UndefinedBehaviorSanitizer
+        run: make asan
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+
+  cmake:
+    name: ${{ matrix.os }} / cmake
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  strict-warnings:
+    name: ubuntu / -Wconversion -Wshadow (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pedantic warning pass
+        run: make strict
