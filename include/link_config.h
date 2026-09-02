@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  link_config.h — the one place where the link is specified.
+ *  link_config.h -- the one place where the link is specified.
  *
  *  Target class: a 200 Gb/s/lane PAM4 SerDes lane, of the kind used in current
  *  AI-accelerator chip-to-chip interconnect. Eight lanes form an octal macro;

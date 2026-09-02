@@ -139,8 +139,19 @@ void hw_lane_run(hw_lane_t *L, unsigned training)
         }
         /* Reference-clock mismatch: the sampling instant drifts by ppm every
          * symbol whether or not the CDR is tracking it. This is what forces a
-         * type-2 loop -- a type-1 loop would accumulate phase error forever. */
+         * type-2 loop -- a type-1 loop would accumulate phase error forever.
+         *
+         * The wrap here is NOT redundant with the one in cdr_update(). This
+         * drift is applied even while the CDR is disabled (during AGC), and
+         * cdr_update() is the only other place the phase is wrapped. Without
+         * this, the phase ran away unbounded before the CDR was ever enabled:
+         * negative offsets drove it below zero, cdr_sample() clamped to index
+         * 0, and every symbol in the block read the same sample. Negative ppm
+         * failed 100% of the time and positive ppm only survived because the
+         * AGC happened to finish quickly. */
         L->cdr.phase += L->ppm_offset * 1e-6 * (double)OSR;
+        while (L->cdr.phase >= (double)OSR) { L->cdr.phase -= (double)OSR; }
+        while (L->cdr.phase <  0.0)         { L->cdr.phase += (double)OSR; }
     }
     L->symbols += HW_BLOCK_SYMS;
 

@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  eq.h — the equaliser DATAPATH. This is hardware, not firmware.
+ *  eq.h -- the equaliser DATAPATH. This is hardware, not firmware.
  *
  *  The split matters and is worth stating in an interview:
  *

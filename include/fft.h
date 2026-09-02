@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  fft.h — iterative radix-2 FFT, in place.
+ *  fft.h -- iterative radix-2 FFT, in place.
  *
  *  Used by the channel synthesiser: an insertion-loss curve is specified in
  *  the frequency domain and transformed to a causal impulse response. Also

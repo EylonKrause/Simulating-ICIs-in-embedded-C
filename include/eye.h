@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  eye.h — eye-diagram accumulation and rendering.
+ *  eye.h -- eye-diagram accumulation and rendering.
  *
  *  This is the software equivalent of pointing a sampling oscilloscope at the
  *  receiver: fold the waveform modulo two unit intervals and build a 2-D

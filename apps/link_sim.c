@@ -1,6 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 /* ===========================================================================
- *  link_sim.c — full link bring-up, end to end.
+ *  link_sim.c -- full link bring-up, end to end.
  *
  *  Runs the real firmware state machine against the hardware model. The
  *  firmware in fw_*.c is the same source that would run on the control

@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  hw_lane.h — the "silicon". TX, channel, AFE, CDR and equaliser wired
+ *  hw_lane.h -- the "silicon". TX, channel, AFE, CDR and equaliser wired
  *  together, running per symbol, driving the register file.
  *
  *  Everything in here is the analogue of RTL plus analogue circuitry. It uses

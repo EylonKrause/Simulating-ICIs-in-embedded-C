@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  pll.h — the reference PLL that clocks the whole lane.
+ *  pll.h -- the reference PLL that clocks the whole lane.
  *
  *  JD: "...manages critical power-on, reset, and calibration sequences..."
  *

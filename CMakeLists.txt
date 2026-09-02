@@ -1,5 +1,5 @@
 # ===========================================================================
-#  CMakeLists.txt — portable build for Linux, macOS and Windows.
+#  CMakeLists.txt -- portable build for Linux, macOS and Windows.
 #
 #      cmake -B build && cmake --build build && ./build/test_all
 #

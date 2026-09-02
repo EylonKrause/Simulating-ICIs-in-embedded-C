@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  mgmt.h — the low-speed management interface, and the telemetry framing
+ *  mgmt.h -- the low-speed management interface, and the telemetry framing
  *           that travels over it.
  *
  *  JD: "...data path control, management, and telemetry."

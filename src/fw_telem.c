@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  fw_telem.c — telemetry producer. Firmware side of the management bus.
+ *  fw_telem.c -- telemetry producer. Firmware side of the management bus.
  *
  *  JD: "...data path control, management, and telemetry."
  *

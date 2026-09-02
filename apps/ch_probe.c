@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  ch_probe.c — verify the channel synthesiser.
+ *  ch_probe.c -- verify the channel synthesiser.
  *
  *  Builds a channel to a requested insertion loss, then measures what it
  *  actually got by transforming the synthesised impulse response back to the

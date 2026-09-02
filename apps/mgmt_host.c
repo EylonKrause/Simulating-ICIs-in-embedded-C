@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  mgmt_host.c — the HOST side of the management bus.
+ *  mgmt_host.c -- the HOST side of the management bus.
  *
  *  Brings a link up, then does what a board controller actually does: reads a
  *  byte stream off a slow side-channel, hunts for framing, validates CRCs,

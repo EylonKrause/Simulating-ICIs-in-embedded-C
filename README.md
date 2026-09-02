@@ -1,7 +1,7 @@
-﻿# Simulating ICIs in embedded C
+# Simulating ICIs in embedded C
 
-A complete 200 Gb/s/lane PAM4 SerDes lane â€” analogue front end, equalisers,
-CDR, and the **firmware that controls them** â€” written from scratch in C17 with
+A complete 200 Gb/s/lane PAM4 SerDes lane -- analogue front end, equalisers,
+CDR, and the **firmware that controls them** -- written from scratch in C17 with
 no dependencies.
 
 The point of the project is not the DSP. It is the **hardware/firmware split**:
@@ -25,12 +25,12 @@ vendor's silicon and contains nothing proprietary.
 
 | Responsibility | Implementation |
 |---|---|
-| Real-time embedded C for **data path control, management, and telemetry** | [`src/fw_bringup.c`](src/fw_bringup.c) â€” bring-up FSM, per-state timeouts, exponential backoff, telemetry counters |
-| **Low-level drivers and HAL** to interface with DSP hardware blocks and registers | [`include/hal.h`](include/hal.h), [`src/hal.c`](src/hal.c) â€” register map, `volatile` MMIO, W1C semantics, critical sections |
-| Firmware-based **adaptation for equaliser taps** | [`src/fw_adapt.c`](src/fw_adapt.c) â€” sign-sign LMS supervisor, gear shifting, leakage |
-| Firmware-based **gain control (VGA/TIA)** | [`src/fw_agc.c`](src/fw_agc.c) â€” AGC with VGAâ†’TIA handoff |
-| **Unit tests and CI** across hardware revisions | [`tests/test_all.c`](tests/test_all.c) â€” 49 checks, no hardware required |
-| **Fixed-point optimisation** for resource-constrained systems | [`include/fixed.h`](include/fixed.h) â€” Q-format, saturation, accumulate-wide/apply-narrow |
+| Real-time embedded C for **data path control, management, and telemetry** | [`src/fw_bringup.c`](src/fw_bringup.c) -- bring-up FSM, per-state timeouts, exponential backoff, telemetry counters |
+| **Low-level drivers and HAL** to interface with DSP hardware blocks and registers | [`include/hal.h`](include/hal.h), [`src/hal.c`](src/hal.c) -- register map, `volatile` MMIO, W1C semantics, critical sections |
+| Firmware-based **adaptation for equaliser taps** | [`src/fw_adapt.c`](src/fw_adapt.c) -- sign-sign LMS supervisor, gear shifting, leakage |
+| Firmware-based **gain control (VGA/TIA)** | [`src/fw_agc.c`](src/fw_agc.c) -- AGC with VGA->TIA handoff |
+| **Unit tests and CI** across hardware revisions | [`tests/test_all.c`](tests/test_all.c) -- 73 checks, no hardware required |
+| **Fixed-point optimisation** for resource-constrained systems | [`include/fixed.h`](include/fixed.h) -- Q-format, saturation, accumulate-wide/apply-narrow |
 
 **No `fw_*.c` file contains a single floating-point operation.** Floats appear
 only in the hardware model, where they stand in for analogue physics.
@@ -55,15 +55,15 @@ only in the hardware model, where they stand in for analogue physics.
 
 Control flows one way only. Firmware writes control registers and reads
 statistics; hardware writes status and accumulators. Swap `hal.c`'s backing
-array for a real peripheral aperture and the firmware source is unchanged â€”
+array for a real peripheral aperture and the firmware source is unchanged --
 that substitution is the whole reason the tests can run without silicon.
 
 | Module | What it does |
 |---|---|
 | `fft.c` | radix-2 FFT, used by the channel synthesiser |
-| `channel.c` | insertion-loss model â†’ **minimum-phase** impulse response |
+| `channel.c` | insertion-loss model -> **minimum-phase** impulse response |
 | `tx.c` | PRBS31, Gray-coded PAM4, TX FFE with an L1 (peak-power) constraint |
-| `afe.c` | photodiode + TIA (with gainâ€“bandwidth tradeoff), VGA, CTLE |
+| `afe.c` | photodiode + TIA (with gain-bandwidth tradeoff), VGA, CTLE |
 | `eq.c` | FFE/DFE datapath and the sign-sign gradient accumulators |
 | `cdr.c` | Mueller-Muller TED, type-2 PI loop, amplitude-normalised |
 | `eye.c` | eye-diagram accumulation, PGM and ASCII rendering |
@@ -97,7 +97,7 @@ response, transform it back, and measure what you actually got:
 ```
 
 **Minimum phase gives physical asymmetry.** Precursors die within two UI while
-the postcursor tail runs long â€” which is exactly why a postcursor-only DFE is
+the postcursor tail runs long -- which is exactly why a postcursor-only DFE is
 worth building:
 
 ```
@@ -116,7 +116,7 @@ worth building:
   rounding          -4,286   =  -1.5e-5 LSB per operation
 ```
 
-A 32,768Ã— reduction in DC bias. In an open-loop filter that is a curiosity; in
+A 32,768??-- reduction in DC bias. In an open-loop filter that is a curiosity; in
 an LMS accumulator or a CDR loop filter it is the difference between a loop
 that holds and one that walks off target.
 
@@ -148,24 +148,37 @@ unguarded read-modify-write and never read-modify-writes a W1C register.
 Cursor pulled down with negative neighbours either side -- an FFE cancelling
 pre- and post-cursor ISI. `49 checks, 0 failures`.
 
+## Operating range
+
+Every configuration below brings the link up with zero pre-FEC bit errors:
+
+| channel | ref offset | link up | note |
+|---|---|---|---|
+| 12 dB | +50 ppm | 173 ms | |
+| 16 dB | 0 ppm | 170 ms | |
+| 20 dB | +120 ppm | 343 ms | |
+| 20 dB | -80 ppm | 174 ms | |
+| 20 dB | -200 ppm | 178 ms | |
+| 26 dB | +120 ppm | 179 ms | |
+| 30 dB | +120 ppm | 180 ms | |
+
 ## Known limitations
 
 Stated plainly rather than hidden.
 
-- **The CDR's steady-state frequency estimate rails at the anti-windup clamp**
-  (+996 ppm reported against +120 actual). The loop tracks well enough for the
-  link to come up and run error-free, but the integrator sits at its limit
-  rather than settling on the true offset. Residual TED bias, not yet resolved.
+- **The CDR frequency readout is biased for positive offsets.** `cdr_ppm()`
+  reports the loop integrator, and that integrator absorbs both the true
+  frequency offset and the residual DC in a Mueller-Muller TED -- which on a
+  minimum-phase channel does not vanish even after equalisation. Negative
+  offsets read accurately (-76 against -80); positive ones drive the integrator
+  to its anti-windup limit. The loop still holds phase and the link runs
+  error-free, so this is a readout defect rather than a tracking one, but it is
+  a defect. A real part reports ppm by counting phase-interpolator rollovers
+  over a known interval instead of trusting a loop-internal value.
 - Ideal FEC. No RS-FEC or LDPC layer, so BER is pre-FEC only.
 - The channel is a fitted two-term loss model, not measured S-parameters. No
   reflections, no crosstalk, no via stubs.
 - Single lane. The 48-lane figure is a specification, not a simulated array.
-- No PLL model. Bring-up goes reset -> AGC -> CDR -> equaliser; a real sequence
-  also waits on PLL lock between reset and AGC.
-- The eye is written to a `.pgm` file. Real silicon cannot write files -- it
-  would packetise the eye-monitor histogram and stream it out over a low-speed
-  management bus (I2C, SPI, or a debug ring) for a host to reassemble.
-
 ## Bugs found while building this
 
 Documented where they occurred, because the diagnosis is worth more than the
@@ -184,6 +197,8 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | Two consumers of one read-and-clear register | `fw_agc_step()` drained `REG_SYM_CNT` before telemetry read it, so symbol and error counts were always zero. |
 | Signed left-shift of a negative value | Undefined behaviour. MSVC and gcc both compiled it silently; UBSan caught it on the first CI run. |
 | Include guard `EYE_H` collided with a constant `EYE_H` | -- |
+| ppm drift applied outside the CDR''s phase wrap | The drift is added even while the CDR is disabled during AGC, but the phase is only wrapped inside `cdr_update()`. It ran away unbounded; negative offsets drove it below zero, `cdr_sample()` clamped to index 0, and every symbol in the block read the same sample. Negative ppm failed 100% of the time. |
+| AGC limit-cycled on single-block measurements | One block of mean-\|y\| is a noisy estimate. The loop stepped, overshot, stepped back, and never accumulated the consecutive in-band blocks that declare convergence -- it hunted between VGA 27 and 32 for the full timeout. Fixed with a single-pole IIR on the measurement and a deadband wider than one gain code (0.476 dB = 5.6% = ~154 units at this target). |
 
 ## Telemetry over a management bus
 
@@ -270,3 +285,4 @@ you: it guarantees the accesses happen, not that they happen atomically.
 - **Measured S-parameters** instead of a fitted two-term loss model -- no
   reflections, no crosstalk, no via stubs today.
 - **Multi-lane.** The 48-lane figure is a specification; one lane is simulated.
+

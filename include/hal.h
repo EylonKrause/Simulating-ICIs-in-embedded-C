@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  hal.h — Hardware Abstraction Layer for one SerDes lane.
+ *  hal.h -- Hardware Abstraction Layer for one SerDes lane.
  *
  *  JD: "Develop low-level drivers and Hardware Abstraction Layers (HAL) to
  *       interface with custom digital signal processing (DSP) hardware blocks

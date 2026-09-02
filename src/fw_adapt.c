@@ -1,5 +1,5 @@
-﻿/* ===========================================================================
- *  fw_adapt.c â€” equaliser tap adaptation. The heart of the firmware.
+/* ===========================================================================
+ *  fw_adapt.c -- equaliser tap adaptation. The heart of the firmware.
  *
  *  JD: "Implement and debug firmware-based adaptation algorithms for
  *       equalizer tap updates..."

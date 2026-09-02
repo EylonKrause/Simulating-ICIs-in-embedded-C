@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  fw_bringup.c â€” link bring-up state machine, timeouts, retry, telemetry.
+ *  fw_bringup.c -- link bring-up state machine, timeouts, retry, telemetry.
  *
  *  JD: "Design and implement real-time embedded C/C++ code for data path
  *       control, management, and telemetry."

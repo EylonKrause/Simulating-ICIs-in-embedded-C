@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  hal.c — the mock MMIO backend.
+ *  hal.c -- the mock MMIO backend.
  *
  *  On real silicon REG_FILE would be a pointer to a peripheral aperture:
  *      static volatile uint32_t * const REG_FILE = (volatile uint32_t *)0x40001000u;

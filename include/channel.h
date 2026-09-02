@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  channel.h — synthesise a lossy interconnect channel from its insertion loss.
+ *  channel.h -- synthesise a lossy interconnect channel from its insertion loss.
  *
  *  The channel is specified the way a real one is measured: an insertion-loss
  *  curve in dB versus frequency. We fit the standard two-term form

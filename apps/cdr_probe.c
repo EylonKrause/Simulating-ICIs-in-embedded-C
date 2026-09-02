@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  cdr_probe.c — instrument the CDR loop in isolation.
+ *  cdr_probe.c -- instrument the CDR loop in isolation.
  *
  *  Debug methodology, and it is the same one to describe in an interview:
  *  when a loop will not converge, FIRST separate the loop from the plant.

@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  afe.h — analogue front end: photodiode + TIA, VGA, CTLE.
+ *  afe.h -- analogue front end: photodiode + TIA, VGA, CTLE.
  *
  *  JD: "...gain control (VGA/TIA)."
  *

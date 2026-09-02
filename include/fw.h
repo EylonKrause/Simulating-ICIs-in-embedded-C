@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  fw.h — the firmware. Fixed point only; no float below this line.
+ *  fw.h -- the firmware. Fixed point only; no float below this line.
  *
  *  JD: "Design and implement real-time embedded C/C++ code for data path
  *       control, management, and telemetry."

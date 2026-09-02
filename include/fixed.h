@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  fixed.h — fixed-point arithmetic for the firmware side.
+ *  fixed.h -- fixed-point arithmetic for the firmware side.
  *
  *  JD: "Fixed-Point arithmetic optimization for resource-constrained
  *       embedded systems"

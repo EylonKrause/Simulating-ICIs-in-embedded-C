@@ -1,4 +1,4 @@
-﻿#include "cdr.h"
+#include "cdr.h"
 #include <math.h>
 #include <string.h>
 

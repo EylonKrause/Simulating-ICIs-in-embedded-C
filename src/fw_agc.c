@@ -1,5 +1,5 @@
-﻿/* ===========================================================================
- *  fw_agc.c â€” automatic gain control over VGA and TIA.
+/* ===========================================================================
+ *  fw_agc.c -- automatic gain control over VGA and TIA.
  *
  *  JD: "...gain control (VGA/TIA)."
  *
@@ -22,7 +22,12 @@
  * Setting this too low starves every downstream loop: the TED gain scales
  * with signal amplitude, so an under-driven AGC silently detunes the CDR. */
 #define AGC_TARGET_Q12      2731
-#define AGC_DEADBAND_Q12    120        /* hysteresis: no update inside this  */
+/* Deadband must be wider than the amplitude change one VGA code causes,
+ * or no settling point exists and the loop hunts forever. The VGA spans
+ * 30 dB over 64 codes = 0.476 dB/code = 5.6%, which at this target is ~154
+ * units -- so a +/-120 band was marginal and a single step could jump clean
+ * across it. */
+#define AGC_DEADBAND_Q12    260        /* hysteresis: no update inside this  */
 #define AGC_SETTLE_BLOCKS   3u         /* consecutive in-band blocks = done  */
 #define AGC_MAX_STEP        4          /* code steps per update, slew limit  */
 
@@ -35,6 +40,7 @@
 static int32_t  g_target = AGC_TARGET_Q12;
 static int32_t  g_vga_bias;
 static unsigned g_settled;
+static int32_t  g_mean_filt;   /* IIR-filtered amplitude, Q4.12 */
 
 void fw_agc_set_target(unsigned attempt)
 {
@@ -52,7 +58,8 @@ int32_t fw_agc_target(void) { return g_target; }
 
 void fw_agc_reset(void)
 {
-    g_settled  = 0u;
+    g_settled   = 0u;
+    g_mean_filt = 0;
     hal_critical_enter();
     hal_field_set(REG_AFE_VGA, VGA_GAIN_MASK, VGA_GAIN_SHIFT,
                   (uint32_t)sat_to((int32_t)(VGA_GAIN_CODES / 2u) + g_vga_bias, 0, (int32_t)VGA_GAIN_CODES - 1));
@@ -76,7 +83,20 @@ int fw_agc_step(void)
     }
 
     const int32_t mean = (int32_t)(amp / n);
-    const int32_t err  = g_target - mean;   /* g_vga_bias shifts where we start */
+
+    /* FILTER THE MEASUREMENT. One block of |y| is a noisy estimate, and an AGC
+     * that reacts to single-block noise LIMIT-CYCLES: it steps, overshoots,
+     * steps back, and never accumulates the consecutive in-band blocks that
+     * declare convergence. Measured before this filter existed: the loop hunted
+     * between VGA 27 and 32 for the full timeout and the link never came up.
+     * A single-pole IIR costs one shift and one add. */
+    if (g_mean_filt == 0) {
+        g_mean_filt = mean;                    /* prime, do not ramp from zero */
+    } else {
+        g_mean_filt += (mean - g_mean_filt) >> 2;   /* alpha = 1/4 */
+    }
+
+    const int32_t err = g_target - g_mean_filt;
 
     if (err > -AGC_DEADBAND_Q12 && err < AGC_DEADBAND_Q12) {
         if (g_settled < AGC_SETTLE_BLOCKS) {

@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  tx.h — transmitter: PRBS source, Gray-coded PAM4 mapper, TX FFE.
+ *  tx.h -- transmitter: PRBS source, Gray-coded PAM4 mapper, TX FFE.
  *
  *  PAM4 GRAY CODING is not cosmetic. The four levels are ordered so adjacent
  *  levels differ in exactly one bit:

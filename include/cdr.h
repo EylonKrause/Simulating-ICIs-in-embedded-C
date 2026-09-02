@@ -1,5 +1,5 @@
 /* ===========================================================================
- *  cdr.h — clock and data recovery: Mueller-Muller TED + type-2 PI loop.
+ *  cdr.h -- clock and data recovery: Mueller-Muller TED + type-2 PI loop.
  *
  *  WHY MUELLER-MULLER AND NOT GARDNER. Gardner needs two samples per symbol
  *  (a data sample and an edge sample). At 100 GBd that means running the

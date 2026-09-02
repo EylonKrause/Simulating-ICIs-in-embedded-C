@@ -1,5 +1,5 @@
-﻿/* ===========================================================================
- *  test_all.c â€” unit tests. Runs with no hardware.
+/* ===========================================================================
+ *  test_all.c -- unit tests. Runs with no hardware.
  *
  *  JD: "Write unit tests and participate in continuous integration flows to
  *       ensure firmware stability across hardware revisions and emulation
