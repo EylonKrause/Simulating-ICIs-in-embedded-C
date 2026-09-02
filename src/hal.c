@@ -29,6 +29,18 @@ static uint32_t          g_w1c_map[REG_COUNT];   /* which bits are W1C       */
 static unsigned          g_crit_depth;
 static hal_stats_t       g_stats;
 
+static void hal_maybe_preempt(void);   /* defined below, used by field_set */
+
+static hal_wr_hook_fn g_wr_hook;
+void hal_set_write_hook(hal_wr_hook_fn fn) { g_wr_hook = fn; }
+
+static hal_isr_fn g_isr;
+static void      *g_isr_ctx;
+static unsigned   g_isr_pending;
+static uint32_t   g_isr_runs;
+static uint32_t   g_isr_deferred;
+static unsigned   g_in_isr;
+
 static size_t idx_of(uint32_t off)
 {
     return (size_t)((off & (REG_SPACE_BYTES - 1u)) >> 2);
@@ -53,6 +65,11 @@ void hal_reset_all(void)
     }
     REG_FILE[idx_of(REG_LANE_ID)] = 0x00010200u;   /* id 0x0200, rev 1 */
     g_crit_depth = 0u;
+    g_isr_pending = 0u;
+    /* NOTE: the write hook and any attached ISR are PLATFORM WIRING, not
+     * register state. A register reset must not tear down the bus fabric --
+     * doing so silently disconnected the management FIFO when fw_init() ran
+     * after the platform was attached. */
     memset(&g_stats, 0, sizeof(g_stats));
 }
 
@@ -67,6 +84,10 @@ void hal_write32(uint32_t off, uint32_t val)
 {
     const size_t i = idx_of(off);
     g_stats.writes++;
+
+    if (g_wr_hook != NULL) {
+        g_wr_hook(off, val);      /* registers with side effects */
+    }
 
     const uint32_t w1c = g_w1c_map[i];
     if (w1c != 0u) {
@@ -99,6 +120,10 @@ void hal_field_set(uint32_t off, uint32_t mask, unsigned shift, uint32_t val)
     }
 
     const uint32_t cur = hal_read32(off);
+
+    /* <-- PREEMPTION POINT. Everything the hazard is about happens here. */
+    hal_maybe_preempt();
+
     const uint32_t nxt = (cur & ~mask) | ((val << shift) & mask);
     hal_write32(off, nxt);
 }
@@ -113,6 +138,7 @@ void hal_bit_write(uint32_t off, uint32_t bitmask, bool on)
         g_stats.w1c_rmw_bugs++;
     }
     const uint32_t cur = hal_read32(off);
+    hal_maybe_preempt();
     hal_write32(off, on ? (cur | bitmask) : (cur & ~bitmask));
 }
 
@@ -149,9 +175,58 @@ int32_t hal_read_signed(uint32_t off, unsigned bits)
     return (int32_t)raw;
 }
 
+/* ---- interrupts ---------------------------------------------------------- */
+
+void hal_attach_isr(hal_isr_fn fn, void *ctx)
+{
+    g_isr = fn;
+    g_isr_ctx = ctx;
+    g_isr_pending = 0u;
+    g_isr_runs = 0u;
+    g_isr_deferred = 0u;
+}
+
+void hal_detach_isr(void) { g_isr = NULL; g_isr_ctx = NULL; }
+uint32_t hal_isr_runs(void)     { return g_isr_runs; }
+uint32_t hal_isr_deferred(void) { return g_isr_deferred; }
+
+/* The preemption point. Called from inside hal_field_set(), between the read
+ * and the write -- the exact instant a real interrupt would land. */
+static void hal_maybe_preempt(void)
+{
+    if (g_isr == NULL || g_in_isr) {
+        return;
+    }
+    if (g_crit_depth != 0u) {
+        g_isr_pending++;          /* masked: it will run on critical_exit */
+        g_isr_deferred++;
+        return;
+    }
+    g_in_isr = 1u;
+    g_isr_runs++;
+    g_isr(g_isr_ctx);
+    g_in_isr = 0u;
+}
+
 /* ---- critical section ---------------------------------------------------- */
 void hal_critical_enter(void) { g_crit_depth++; }        /* __disable_irq() */
-void hal_critical_exit (void) { if (g_crit_depth) { g_crit_depth--; } }
+
+void hal_critical_exit(void)
+{
+    if (g_crit_depth) {
+        g_crit_depth--;
+    }
+    /* Replay anything that arrived while interrupts were masked. Real silicon
+     * does this in hardware: the interrupt stays pending in the NVIC and fires
+     * the moment PRIMASK clears. */
+    while (g_crit_depth == 0u && g_isr_pending > 0u && g_isr != NULL && !g_in_isr) {
+        g_isr_pending--;
+        g_in_isr = 1u;
+        g_isr_runs++;
+        g_isr(g_isr_ctx);
+        g_in_isr = 0u;
+    }
+}
 unsigned hal_critical_depth(void) { return g_crit_depth; }
 
 /* ---- hardware side ------------------------------------------------------- */

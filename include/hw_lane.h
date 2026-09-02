@@ -19,6 +19,10 @@
 #include "afe.h"
 #include "eq.h"
 #include "cdr.h"
+#include "pll.h"
+#include "mgmt.h"
+#include "pll.h"
+#include "mgmt.h"
 
 #define HW_BLOCK_SYMS 4096u
 
@@ -28,6 +32,13 @@ typedef struct {
     afe_t     afe;
     eq_t      eq;
     cdr_t     cdr;
+    pll_t     pll;
+
+    /* Eye-monitor capture RAM. Hardware fills it; firmware reads it one byte
+     * at a time through the REG_EYE_ADDR / REG_EYE_DATA window, because
+     * firmware has no pointer into a hardware buffer -- it has an address
+     * register and a data register. */
+    uint8_t   eye_ram[MGMT_EYE_BYTES];
 
     real_t   *osr_buf;      /* oversampled TX-through-channel waveform */
     real_t   *rx_buf;       /* after the AFE                           */
@@ -49,8 +60,14 @@ void hw_lane_run(hw_lane_t *L, unsigned training);
 /* Model a loss-of-signal event, so the bring-up FSM has something to fail on. */
 void hw_lane_set_signal(hw_lane_t *L, unsigned present);
 
+/* Attach the register side-effect hooks and start the management bus. */
+void hw_lane_attach_platform(hw_lane_t *L, unsigned mgmt_bytes_per_block);
+
 /* Capture one block into an eye-diagram accumulator (see eye.h). */
 struct eye_s;
 void hw_lane_capture_eye(hw_lane_t *L, struct eye_s *eye);
+
+/* Downsample an accumulated eye into the capture RAM the firmware reads. */
+void hw_lane_load_eye_ram(hw_lane_t *L, const struct eye_s *eye);
 
 #endif /* HW_LANE_H */

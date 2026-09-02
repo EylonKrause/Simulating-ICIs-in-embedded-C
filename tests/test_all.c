@@ -18,6 +18,8 @@
  *  someone breaks the adaptation.
  * =========================================================================*/
 #include "fixed.h"
+#include "pll.h"
+#include "mgmt.h"
 #include "hal.h"
 #include "fw.h"
 #include "tx.h"
@@ -300,6 +302,137 @@ static void test_channel(void)
     }
 }
 
+/* ===========================================================================
+ *  Interrupt preemption: the RMW hazard, DEMONSTRATED rather than asserted.
+ *
+ *  The HAL used only to COUNT unguarded read-modify-writes. A count is a claim
+ *  about a hazard. This fires a real interrupt at the one instant that matters
+ *  -- between the read and the write -- and watches the update disappear.
+ * =========================================================================*/
+static void isr_touch_other_field(void *ctx)
+{
+    /* A plausible ISR: something completed, so it sets ENABLE in the very
+     * register the foreground code is editing a different field of. Short, and
+     * using hal_write32 directly, as a real ISR would. */
+    (void)ctx;
+    hal_write32(REG_CTRL, hal_read32(REG_CTRL) | CTRL_EN);
+}
+
+static void test_rmw_preemption(void)
+{
+    /* --- unguarded: the interrupt's update is DESTROYED ------------------ */
+    hal_reset_all();
+    hal_attach_isr(isr_touch_other_field, NULL);
+    hal_write32(REG_CTRL, 0u);
+
+    /* No critical section. The ISR lands between our read and our write, sets
+     * CTRL_EN, and then our stale write-back erases it. */
+    hal_field_set(REG_CTRL, 0xF0u, 4u, 0x5u);
+
+    CHECK(hal_isr_runs() == 1u, "ISR ran inside the unguarded RMW");
+    CHECK((hal_read32(REG_CTRL) & 0xF0u) == 0x50u, "our own field was written");
+    CHECK((hal_read32(REG_CTRL) & CTRL_EN) == 0u,
+          "LOST UPDATE: the ISR set CTRL_EN and the RMW wiped it out");
+    CHECK(hal_stats()->unguarded_rmw == 1u, "the unguarded RMW was counted");
+
+    /* --- guarded: deferred, replayed, nothing lost ------------------------ */
+    hal_reset_all();
+    hal_attach_isr(isr_touch_other_field, NULL);
+    hal_write32(REG_CTRL, 0u);
+
+    hal_critical_enter();
+    hal_field_set(REG_CTRL, 0xF0u, 4u, 0x5u);
+    hal_critical_exit();               /* the pending interrupt replays here */
+
+    CHECK(hal_isr_deferred() == 1u, "the guard held the interrupt off");
+    CHECK(hal_isr_runs() == 1u,     "and it replayed on critical_exit");
+    CHECK((hal_read32(REG_CTRL) & 0xF0u) == 0x50u, "our field survived");
+    CHECK((hal_read32(REG_CTRL) & CTRL_EN) != 0u,
+          "and so did the interrupt's bit -- nothing was lost");
+    CHECK(hal_stats()->unguarded_rmw == 0u, "no unguarded RMW this time");
+
+    hal_detach_isr();
+}
+
+/* ---- PLL bring-up -------------------------------------------------------- */
+static void test_pll(void)
+{
+    hal_reset_all();
+    pll_t p;
+    pll_init(&p, 5u);
+
+    hal_write32(REG_PLL_CTRL, 0u);
+    for (unsigned i = 0; i < 50u; ++i) { pll_step(&p); }
+    CHECK((hal_read32(REG_STATUS) & STAT_PLL_LOCK) == 0u,
+          "a disabled PLL never reports lock, however long you wait");
+
+    hal_write32(REG_PLL_CTRL, PLL_EN);
+    for (unsigned i = 0; i < 4u; ++i) { pll_step(&p); }
+    CHECK((hal_read32(REG_STATUS) & STAT_PLL_LOCK) == 0u,
+          "not locked before the settling time has elapsed");
+    for (unsigned i = 0; i < 4u; ++i) { pll_step(&p); }
+    CHECK((hal_read32(REG_STATUS) & STAT_PLL_LOCK) != 0u, "locked after settling");
+
+    /* The failure path has to be reachable, or the FSM timeout is dead code. */
+    pll_force_fail(&p, 1u);
+    for (unsigned i = 0; i < 50u; ++i) { pll_step(&p); }
+    CHECK((hal_read32(REG_STATUS) & STAT_PLL_LOCK) == 0u,
+          "a failing PLL stays unlocked so the bring-up FSM can time out");
+    pll_force_fail(&p, 0u);
+}
+
+/* ---- management framing -------------------------------------------------- */
+static void test_mgmt_framing(void)
+{
+    uint8_t f[MGMT_FRAME_BYTES];
+    const uint8_t pay[4] = { 0xDEu, 0xADu, 0xBEu, 0xEFu };
+
+    CHECK(mgmt_frame_build(f, MGMT_T_STATUS, 0x1234u, pay, 4u) == 0, "frame builds");
+    CHECK(f[0] == MGMT_SOF, "SOF present");
+    CHECK(f[2] == 0x34u && f[3] == 0x12u, "sequence is little endian");
+    CHECK(mgmt_frame_check(f) == 0, "a good frame validates");
+
+    /* Every single-bit corruption must be caught. A CRC that misses bit flips
+     * is worse than no CRC: it makes corrupt telemetry look trustworthy. */
+    unsigned caught = 0u, tried = 0u;
+    for (unsigned byte = 0; byte < MGMT_FRAME_BYTES; ++byte) {
+        for (unsigned bit = 0; bit < 8u; ++bit) {
+            uint8_t g[MGMT_FRAME_BYTES];
+            memcpy(g, f, sizeof(g));
+            g[byte] ^= (uint8_t)(1u << bit);
+            tried++;
+            if (mgmt_frame_check(g) != 0) { caught++; }
+        }
+    }
+    CHECK(caught == tried, "CRC-8 catches every single-bit error in the frame");
+
+    CHECK(mgmt_frame_build(f, MGMT_T_STATUS, 0u, pay, MGMT_PAYLOAD_MAX + 1u) != 0,
+          "an oversized payload is rejected, not silently truncated");
+}
+
+/* ---- management bus backpressure ---------------------------------------- */
+static void test_mgmt_backpressure(void)
+{
+    hal_reset_all();
+    mgmt_bus_init(4u);                      /* deliberately slow drain */
+    hal_set_write_hook(NULL);               /* push directly, no platform */
+    hal_write32(REG_MGMT_CTRL, MGMT_TX_EN);
+
+    for (unsigned i = 0; i < MGMT_FIFO_BYTES; ++i) {
+        mgmt_bus_push(0xAAu);
+    }
+    CHECK(mgmt_bus_free() == 0u, "the FIFO fills");
+    CHECK(mgmt_bus_dropped() == 0u, "nothing dropped while there was room");
+
+    mgmt_bus_push(0x55u);
+    CHECK(mgmt_bus_dropped() == 1u,
+          "pushing into a full FIFO LOSES the byte -- hence check free space first");
+
+    mgmt_bus_tick();
+    CHECK(mgmt_bus_free() == 4u, "the bus drains at its configured rate, not faster");
+    CHECK(mgmt_wire_available() == 4u, "and the drained bytes appear on the wire");
+}
+
 int main(void)
 {
     printf("=====================================================\n");
@@ -313,6 +446,10 @@ int main(void)
     test_leakage();
     test_pam4();
     test_channel();
+    test_rmw_preemption();
+    test_pll();
+    test_mgmt_framing();
+    test_mgmt_backpressure();
 
     printf("\n-----------------------------------------------------\n");
     printf(" %d checks, %d failures\n", g_run, g_fail);

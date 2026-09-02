@@ -48,6 +48,13 @@
 #define REG_SYM_CNT        0x098u   /* RO/W1C  symbols observed              */
 #define REG_EYE_CTRL       0x09Cu   /* RW  margining: phase + level          */
 #define REG_EYE_ERR        0x0A0u   /* RO/W1C  errors at that margin point   */
+#define REG_PLL_CTRL       0x0A4u   /* RW  [0] PLL_EN, [1] PLL_BYPASS        */
+#define REG_PLL_STAT       0x0A8u   /* RO  [0] LOCKED, [15:8] lock counter   */
+#define REG_MGMT_CTRL      0x0ACu   /* RW  [0] TX_EN                         */
+#define REG_MGMT_STAT      0x0B0u   /* RO  [15:0] free bytes in the TX FIFO  */
+#define REG_MGMT_DATA      0x0B4u   /* WO  push one byte into the TX FIFO    */
+#define REG_EYE_ADDR       0x0B8u   /* RW  index into the eye capture RAM    */
+#define REG_EYE_DATA       0x0BCu   /* RO  byte at REG_EYE_ADDR              */
 
 /* ---- CTRL ---------------------------------------------------------------- */
 #define CTRL_EN            (1u << 0)
@@ -62,6 +69,7 @@
 #define STAT_AGC_CONV      (1u << 3)   /* RO  */
 #define STAT_ERR_OVF       (1u << 8)   /* W1C -- error counter overflowed    */
 #define STAT_LOS           (1u << 9)   /* W1C -- loss of signal was seen     */
+#define STAT_PLL_LOCK      (1u << 4)   /* RO  -- reference PLL is locked     */
 #define STATUS_W1C_MASK    (STAT_ERR_OVF | STAT_LOS)
 
 /* ---- ADAPT_CTRL ---------------------------------------------------------- */
@@ -73,6 +81,13 @@
 #define ADAPT_MU_SHIFT     8u
 #define ADAPT_LEAK_MASK    (0xFu << 12)
 #define ADAPT_LEAK_SHIFT   12u
+
+/* ---- PLL / management ---------------------------------------------------- */
+#define PLL_EN             (1u << 0)
+#define PLL_BYPASS         (1u << 1)
+#define PLL_STAT_LOCKED    (1u << 0)
+#define MGMT_TX_EN         (1u << 0)
+#define MGMT_FIFO_BYTES    512u
 
 /* ---- field widths -------------------------------------------------------- */
 #define TIA_GAIN_MASK      0x0000000Fu
@@ -121,12 +136,38 @@ uint32_t hal_read_clear(uint32_t off);
 void     hal_write_signed(uint32_t off, int32_t val, unsigned bits);
 int32_t  hal_read_signed (uint32_t off, unsigned bits);
 
+/* ===========================================================================
+ *  INTERRUPTS
+ *
+ *  The RMW hazard is not asserted here, it is EXERCISED. Attach an ISR and the
+ *  mock bus invokes it at the one instant that matters: between the read and
+ *  the write inside hal_field_set(). That is precisely where a real interrupt
+ *  lands, and precisely what `volatile` does NOT protect you from -- volatile
+ *  guarantees the accesses happen, not that they happen atomically.
+ *
+ *  With no critical section the ISR runs immediately and its update to another
+ *  field of the same register is erased by our stale write-back. Inside a
+ *  critical section it is DEFERRED and replayed on exit, and nothing is lost.
+ *  tests/test_all.c asserts both halves. */
+typedef void (*hal_isr_fn)(void *ctx);
+
+void     hal_attach_isr(hal_isr_fn fn, void *ctx);
+void     hal_detach_isr(void);
+uint32_t hal_isr_runs(void);        /* times the ISR actually executed   */
+uint32_t hal_isr_deferred(void);    /* times it was held off by a guard  */
+
 /* Critical section. On real silicon these are __disable_irq()/__enable_irq();
  * here they count nesting so tests can assert the firmware never does an
  * unguarded RMW. */
 void     hal_critical_enter(void);
 void     hal_critical_exit (void);
 unsigned hal_critical_depth(void);
+
+/* Some registers are not storage. A write-only FIFO port pushes a byte into a
+ * queue and the value is never readable again; a "clear" register triggers an
+ * action. Hardware models such registers by attaching a write hook. */
+typedef void (*hal_wr_hook_fn)(uint32_t off, uint32_t val);
+void     hal_set_write_hook(hal_wr_hook_fn fn);
 
 /* ---- backend, for the hardware model and for tests ----------------------- */
 /* hw_* entry points are the "silicon side" of the register file. Firmware

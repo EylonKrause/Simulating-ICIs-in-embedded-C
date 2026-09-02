@@ -89,6 +89,13 @@ static void hw_apply_afe_regs(hw_lane_t *L)
 
 void hw_lane_run(hw_lane_t *L, unsigned training)
 {
+    /* The reference PLL runs regardless of everything else: it is the clock
+     * the rest of the lane depends on, and nothing downstream is meaningful
+     * until it has locked. The management bus drains at its own fixed rate,
+     * likewise independent of what the data path is doing. */
+    pll_step(&L->pll);
+    mgmt_bus_tick();
+
     hw_apply_afe_regs(L);
     eq_refresh_taps(&L->eq);
 
@@ -171,4 +178,61 @@ void hw_lane_capture_eye(hw_lane_t *L, struct eye_s *eye)
         L->rx_buf[i] = afe_step(&L->afe, L->rx_buf[i], (real_t)gauss(&L->rng));
     }
     eye_accumulate(eye, L->rx_buf, L->buf_samples, (unsigned)(L->cdr.phase));
+}
+
+/* ===========================================================================
+ *  Platform glue: registers that are not storage.
+ *
+ *  REG_MGMT_DATA is a write-only FIFO port -- the write is a PUSH and the
+ *  value is never readable back. REG_EYE_ADDR latches an index and the
+ *  hardware presents that byte in REG_EYE_DATA. Both are side effects, which
+ *  is why they need a hook rather than a memory cell.
+ * =========================================================================*/
+static hw_lane_t *g_hooked_lane;
+
+static void hw_write_hook(uint32_t off, uint32_t val)
+{
+    if (off == REG_MGMT_DATA) {
+        mgmt_bus_push(val);
+        return;
+    }
+    if (off == REG_EYE_ADDR && g_hooked_lane != NULL) {
+        const uint32_t idx = val % MGMT_EYE_BYTES;
+        hw_reg_set(REG_EYE_DATA, g_hooked_lane->eye_ram[idx]);
+    }
+}
+
+void hw_lane_attach_platform(hw_lane_t *L, unsigned mgmt_bytes_per_block)
+{
+    g_hooked_lane = L;
+    mgmt_bus_init(mgmt_bytes_per_block);
+    hal_set_write_hook(hw_write_hook);
+    pll_init(&L->pll, 8u);          /* ~8 blocks to settle */
+}
+
+void hw_lane_load_eye_ram(hw_lane_t *L, const struct eye_s *eye)
+{
+    /* Box-average the full 128x96 histogram down to 32x24 and log-compress to
+     * one byte per bin. 12288 bins would take half a second on this bus; 768
+     * is what a real eye monitor reports and it is enough to see the opening. */
+    uint32_t peak = 1u;
+    for (unsigned y = 0; y < EYE_H; ++y) {
+        for (unsigned x = 0; x < EYE_W; ++x) {
+            if (eye->hist[y][x] > peak) { peak = eye->hist[y][x]; }
+        }
+    }
+    for (unsigned r = 0; r < MGMT_EYE_H; ++r) {
+        for (unsigned c = 0; c < MGMT_EYE_W; ++c) {
+            uint32_t acc = 0u;
+            for (unsigned y = r * EYE_H / MGMT_EYE_H; y < (r + 1u) * EYE_H / MGMT_EYE_H; ++y) {
+                for (unsigned x = c * EYE_W / MGMT_EYE_W; x < (c + 1u) * EYE_W / MGMT_EYE_W; ++x) {
+                    acc += eye->hist[y][x];
+                }
+            }
+            const double v = log1p((double)acc) / log1p((double)peak);
+            int p = (int)(v * 255.0 + 0.5);
+            if (p > 255) { p = 255; }
+            L->eye_ram[r * MGMT_EYE_W + c] = (uint8_t)p;
+        }
+    }
 }

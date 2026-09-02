@@ -185,11 +185,88 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | Signed left-shift of a negative value | Undefined behaviour. MSVC and gcc both compiled it silently; UBSan caught it on the first CI run. |
 | Include guard `EYE_H` collided with a constant `EYE_H` | -- |
 
+## Telemetry over a management bus
+
+A chip cannot write `eye.pgm`. Everything a host learns about a lane arrives as
+bytes over a slow side-channel while the data path runs at 100 GBd:
+
+```
+  data path        100 GBd    = 2e11 bit/s
+  management bus     1 Mb/s   = 1e6  bit/s        200,000x slower
+```
+
+Every design decision follows from that ratio. [`src/fw_telem.c`](src/fw_telem.c)
+packetises status, counters, taps and the eye histogram into fixed 32-byte
+frames -- SOF, type, little-endian sequence, length, payload, CRC-8 -- and
+[`apps/mgmt_host.c`](apps/mgmt_host.c) is a host that shares no memory with the
+firmware: it hunts for framing byte by byte, validates every CRC, tracks
+sequence gaps, and reassembles the eye from chunks.
+
+```
+  frames ok / bad     205 / 0
+  sequence gaps       0
+  bytes dropped by HW 0
+  FFE taps              -1   +0   -3  +19   -3   -1   -1   -1
+  eye reassembled     768/768 bytes (32 x 24)
+```
+
+Four things that only matter once the bus is real:
+
+- **Backpressure.** The FIFO is 512 bytes. `REG_MGMT_STAT` reports free space
+  and the producer checks it before every frame. Push into a full FIFO and the
+  byte is simply gone -- so firmware that blasts loses the middle of its own
+  eye and reports a corrupt one.
+- **Chunking.** 32x24 downsampled is 768 bytes = 30 frames. The full 128x96
+  histogram would be 12288 bins and take half a second. Telemetry is a
+  background task; it never blocks a control loop.
+- **Round-robin.** A long eye transfer must not starve status. Losing the link
+  and being unable to say so is the worst failure mode here.
+- **An indexed register window.** Firmware has no pointer into the capture RAM.
+  It writes `REG_EYE_ADDR` and reads `REG_EYE_DATA`, two bus transactions per
+  byte -- which is itself why you stream a downsampled eye.
+
+## PLL lock in the bring-up sequence
+
+```
+RESET -> PLL_LOCK -> WAIT_SIGNAL -> AGC -> CDR_LOCK -> EQ_TRAIN -> TRACK -> UP
+```
+
+The reference PLL is the clock everything else depends on: a CDR cannot recover
+a clock when there is none to recover against. [`src/pll.c`](src/pll.c) models
+charge-pump settling, and the FSM **waits with a timeout** rather than assuming
+-- a PLL can fail outright on a wrong divider, an absent reference, or a VCO out
+of band. `pll_force_fail()` exists so that timeout path is reachable in tests.
+
+Losing PLL lock is immediate death; losing CDR lock is not. That asymmetry is
+in the code, and it came from a measurement: the link came up, emitted exactly
+one telemetry frame, then tore itself down on a single dropped lock sample.
+Loss-of-lock now needs 25 consecutive ticks. The difference between a glitch
+and an outage is hysteresis.
+
+## The RMW hazard, demonstrated rather than asserted
+
+The HAL used only to *count* unguarded read-modify-writes. A count is a claim.
+Now an interrupt actually fires at the one instant that matters -- between the
+read and the write inside `hal_field_set()` -- and the test watches the update
+vanish:
+
+```c
+hal_attach_isr(isr_sets_CTRL_EN, NULL);
+hal_field_set(REG_CTRL, 0xF0u, 4u, 0x5u);      /* no critical section */
+
+CHECK((reg & 0xF0u) == 0x50u, "our field was written");
+CHECK((reg & CTRL_EN) == 0u,  "LOST UPDATE: the ISR set it, the RMW wiped it");
+```
+
+Wrap the same call in `hal_critical_enter/exit` and the interrupt is deferred,
+replayed on exit, and **nothing is lost** -- exactly as a pending interrupt
+behaves in an NVIC when PRIMASK clears. This is what `volatile` does *not* buy
+you: it guarantees the accesses happen, not that they happen atomically.
+
 ## What I would add next
 
-- **Telemetry streaming.** Packetise the eye histogram and error counters into
-  fixed-size records and push them over a management bus, rather than writing a
-  file. That is what the JD's "telemetry" actually means on silicon.
-- **PLL lock state** in the bring-up FSM, between reset and AGC.
-- **Interrupt-driven register access**, so the RMW hazard the HAL already
-  counts can be exercised by a real preemption rather than asserted about.
+- **FEC.** RS-FEC (KP4) or LDPC, so BER is post-FEC and soft-decision gain is
+  visible. Currently pre-FEC only.
+- **Measured S-parameters** instead of a fitted two-term loss model -- no
+  reflections, no crosstalk, no via stubs today.
+- **Multi-lane.** The 48-lane figure is a specification; one lane is simulated.

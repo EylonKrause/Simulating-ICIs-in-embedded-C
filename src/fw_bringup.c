@@ -1,4 +1,4 @@
-﻿/* ===========================================================================
+/* ===========================================================================
  *  fw_bringup.c â€” link bring-up state machine, timeouts, retry, telemetry.
  *
  *  JD: "Design and implement real-time embedded C/C++ code for data path
@@ -32,9 +32,13 @@
 /* Convergence may not be declared before this much training has elapsed. */
 #define EQ_MIN_TRAIN_MS  150u
 
+/* Consecutive ticks of CDR unlock before the link is declared down. */
+#define LOSS_OF_LOCK_TICKS  25u
+
 /* Per-state timeout, milliseconds. A table, not scattered constants. */
 static const uint32_t STATE_TIMEOUT_MS[LS_COUNT] = {
     [LS_RESET]       =    2u,
+    [LS_PLL_LOCK]    =   60u,   /* charge-pump settling, then give up      */
     [LS_WAIT_SIGNAL] =  200u,
     [LS_AGC]         =  120u,
     [LS_CDR_LOCK]    =  300u,
@@ -45,7 +49,8 @@ static const uint32_t STATE_TIMEOUT_MS[LS_COUNT] = {
 };
 
 static const char *const STATE_NAME[LS_COUNT] = {
-    "RESET", "WAIT_SIGNAL", "AGC", "CDR_LOCK", "EQ_TRAIN", "TRACK", "UP", "FAULT"
+    "RESET", "PLL_LOCK", "WAIT_SIGNAL", "AGC", "CDR_LOCK",
+    "EQ_TRAIN", "TRACK", "UP", "FAULT"
 };
 
 const char *fw_state_name(link_state_t s)
@@ -115,7 +120,24 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
         fw_agc_set_target(L->retries);   /* search a new amplitude each retry */
         fw_agc_reset();
         fw_adapt_reset();
-        enter(L, LS_WAIT_SIGNAL);
+        fw_telem_reset();
+        /* Start the reference PLL. NOTHING else can begin until it locks --
+         * a CDR cannot recover a clock when there is no clock to recover
+         * against, and the AGC would be measuring an unclocked datapath. */
+        hal_write32(REG_PLL_CTRL, PLL_EN);
+        enter(L, LS_PLL_LOCK);
+        break;
+
+    case LS_PLL_LOCK:
+        /* A charge-pump PLL settles in a time set by its loop bandwidth, and
+         * it can fail outright -- wrong divider, absent reference, VCO out of
+         * band. So this WAITS with a timeout; it never assumes. */
+        if ((st & STAT_PLL_LOCK) != 0u) {
+            enter(L, LS_WAIT_SIGNAL);
+        } else if (expired) {
+            L->tm.timeouts[LS_PLL_LOCK]++;
+            enter(L, LS_FAULT);
+        }
         break;
 
     case LS_WAIT_SIGNAL:
@@ -231,8 +253,27 @@ void fw_tick(fw_link_t *L, uint32_t now_ms)
         L->tm.bit_errors += hal_read_clear(REG_ERR_CNT);
         (void)fw_agc_step();
         (void)fw_adapt_step();
-        if ((st & STAT_CDR_LOCK) == 0u) {
-            enter(L, LS_FAULT);                 /* lost lock */
+        /* Telemetry is a BACKGROUND task: one frame per tick at most, and
+         * only when the FIFO has room. It must never delay a control loop. */
+        fw_telem_step(L);
+        /* LOSS OF LOCK NEEDS HYSTERESIS. The CDR lock flag is a live
+         * indication and it dips momentarily under noise even on a perfectly
+         * healthy link -- measured here, the link came up, emitted exactly one
+         * telemetry frame, then tore itself down on a single dropped sample.
+         * Requiring a SUSTAINED loss is the difference between a glitch and an
+         * outage.
+         *
+         * PLL lock is not the same case. If the clock is gone then nothing
+         * downstream means anything, so that one is immediate. */
+        if ((st & STAT_PLL_LOCK) == 0u) {
+            enter(L, LS_FAULT);
+        } else if ((st & STAT_CDR_LOCK) == 0u) {
+            L->unlock_ticks++;
+            if (L->unlock_ticks >= LOSS_OF_LOCK_TICKS) {
+                enter(L, LS_FAULT);
+            }
+        } else {
+            L->unlock_ticks = 0u;
         }
         break;
 

@@ -36,6 +36,7 @@
 
 typedef enum {
     LS_RESET = 0,
+    LS_PLL_LOCK,          /* nothing else can start until the clock exists */
     LS_WAIT_SIGNAL,
     LS_AGC,
     LS_CDR_LOCK,
@@ -66,6 +67,7 @@ typedef struct {
     uint32_t       now_ms;
     uint32_t       retries;
     uint32_t       backoff_ms;
+    uint32_t       unlock_ticks;   /* consecutive ticks with CDR unlocked */
     fw_telemetry_t tm;
 } fw_link_t;
 
@@ -83,7 +85,12 @@ int  fw_agc_converged(void);
 
 void fw_adapt_reset(void);
 void fw_adapt_set_gear(unsigned mu_shift, unsigned leak_shift);
-int  fw_adapt_step(void);               /* 1 when the taps have settled      */
+int  fw_adapt_step(void);               /* 1 when the taps have settledint32_t fw_adapt_activity(void);        /* last block's summed |gradient|     */
+
+void     fw_telem_reset(void);
+void     fw_telem_step(const fw_link_t *L);
+uint32_t fw_telem_frames(void);
+uint32_t fw_telem_deferred(void);
 int  fw_adapt_converged(void);
 int32_t fw_adapt_tap(unsigned i);       /* accumulator value, for tests      */
 int32_t fw_adapt_activity(void);        /* last block's summed |gradient|      */

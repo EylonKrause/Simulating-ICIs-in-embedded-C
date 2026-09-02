@@ -13,6 +13,7 @@
 #include "hw_lane.h"
 #include "eye.h"
 #include "fixed.h"
+#include "mgmt.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +41,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "hw_lane_init failed\n");
         return 1;
     }
+
+    /* ~128 bytes per 1 ms block == ~1 Mb/s management bus, five orders of
+     * magnitude below the 100 GBd data path. Everything about telemetry
+     * pacing follows from that ratio. */
+    hw_lane_attach_platform(&hw, 128u);
 
     fw_link_t fw;
     fw_init(&fw);
@@ -93,8 +99,18 @@ int main(int argc, char **argv)
         printf("    b[%u] = %+4d\n", i, hal_read_signed(REG_DFE_TAP(i), TAP_APPLY_BITS));
     }
 
-    /* ---- steady-state telemetry ----------------------------------------- */
-    for (unsigned k = 0; k < 40u; ++k) {
+    /* ---- capture an eye, then let telemetry stream it out --------------- */
+    eye_t eye;
+    eye_init(&eye, -1.6, 1.6);
+    for (unsigned k = 0; k < 8u; ++k) {
+        hw_lane_capture_eye(&hw, &eye);
+    }
+    hw_lane_load_eye_ram(&hw, &eye);   /* hardware fills the capture RAM */
+
+    /* 60 ticks of steady state. The eye is 768 bytes = 30 frames = 960 bytes
+     * on the wire, and the bus moves 128 bytes per tick -- so a full eye takes
+     * ~8 ticks to stream while the link keeps running underneath it. */
+    for (unsigned k = 0; k < 60u; ++k) {
         hw_lane_run(&hw, 0u);
         fw_tick(&fw, (t + k) * TICK_MS);
     }
@@ -112,6 +128,14 @@ int main(int argc, char **argv)
     }
     printf("    CDR ppm estimate    %+.1f  (actual %+.1f)\n", cdr_ppm(&hw.cdr), ppm);
 
+    printf("\n  management bus (telemetry out, ~1 Mb/s)\n");
+    printf("    frames emitted      %u\n", fw_telem_frames());
+    printf("    ticks deferred      %u   (FIFO was full; backpressure respected)\n",
+           fw_telem_deferred());
+    printf("    bytes dropped       %u   %s\n", mgmt_bus_dropped(),
+           mgmt_bus_dropped() ? "<-- BUG: pushed into a full FIFO" : "(ok)");
+    printf("    bytes on the wire   %zu\n", mgmt_wire_available());
+
     /* ---- bus hygiene: these must be zero -------------------------------- */
     const hal_stats_t *hs = hal_stats();
     printf("\n  HAL access audit\n");
@@ -124,11 +148,6 @@ int main(int argc, char **argv)
            hs->w1c_rmw_bugs ? "<-- BUG: read-modify-wrote a W1C register" : "(ok)");
 
     /* ---- eye diagram ---------------------------------------------------- */
-    eye_t eye;
-    eye_init(&eye, -1.6, 1.6);
-    for (unsigned k = 0; k < 8u; ++k) {
-        hw_lane_capture_eye(&hw, &eye);
-    }
     printf("\n  eye at the slicer input (%llu samples)\n", (unsigned long long)eye.hits);
     eye_print_ascii(&eye, 96u, 26u);
     if (eye_write_pgm(&eye, "eye.pgm") == 0) {
