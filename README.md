@@ -1,5 +1,7 @@
 # Simulating ICIs in embedded C
 
+[![CI](https://github.com/EylonKrause/Simulating-ICIs-in-embedded-C/actions/workflows/ci.yml/badge.svg)](https://github.com/EylonKrause/Simulating-ICIs-in-embedded-C/actions/workflows/ci.yml)
+
 A complete 200 Gb/s/lane PAM4 SerDes lane -- analogue front end, equalisers,
 CDR, and the **firmware that controls them** -- written from scratch in C17 with
 no dependencies.
@@ -30,7 +32,7 @@ vendor's silicon and contains nothing proprietary.
 | Equaliser tap adaptation | [`src/fw_adapt.c`](src/fw_adapt.c) -- sign-sign LMS supervisor, gear shifting, leakage |
 | Gain control (VGA and TIA) | [`src/fw_agc.c`](src/fw_agc.c) -- AGC with the VGA-to-TIA handoff |
 | Forward error correction | [`src/fec.c`](src/fec.c), [`src/pcs.c`](src/pcs.c) -- RS(544,514) KP4, codeword framing, BER scoring |
-| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 162 checks |
+| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 173 checks |
 | Fixed-point arithmetic | [`include/fixed.h`](include/fixed.h) -- Q-format, saturation, accumulate-wide/apply-narrow |
 
 **No `fw_*.c` file contains a single floating-point operation, and none of them
@@ -45,7 +47,7 @@ ever pointed at it. A claim that lives only in a header is a claim that drifts.
 decodes, and the bus audit is clean -- and `macro_sim` additionally fails if
 the supervisor's round robin drifts by more than one service between lanes.
 This matters because for most of this project's history the unit tests were
-green while the receiver did not work: 162 checks of loops and registers say
+green while the receiver did not work: 173 checks of loops and registers say
 nothing about whether the thing at the end of them recovers data.
 
 ## Architecture
@@ -90,7 +92,7 @@ that substitution is the whole reason the tests can run without silicon.
 Needs only MSVC Build Tools (or any C17 compiler).
 
 ```bat
-build.bat test_all                     :: 162 unit tests, no hardware
+build.bat test_all                     :: 173 unit tests, no hardware
 build.bat ch_probe 20                  :: channel synthesis, checked against its own model
 build.bat ch_probe ..\data\pkg_backplane.s4p    :: the same, from S-parameters
 build.bat cdr_probe 20 -80             :: CDR loop in isolation, instrumented
@@ -172,11 +174,12 @@ A clean run, 12 dB and -80 ppm, first attempt:
     post-FEC BER        < 6.5e-07   (no residual errors in 1531720 bits)
     KP4 margin          +25.9 dB against the 2.4e-4 pre-FEC limit
 
-  management bus      268 frames, 0 bytes dropped
-  HAL access audit    15 read-modify-writes, 0 unguarded, 0 W1C bugs
+  management bus      260 frames, 0 bytes dropped
+  HAL access audit    15 read-modify-writes, 0 unguarded, 0 W1C bugs,
+                      0 accesses to an address silicon would fault on
 ```
 
-`162 checks, 0 failures`, and the same under AddressSanitizer.
+`173 checks, 0 failures`, and the same under AddressSanitizer.
 
 **The interesting runs are the ones that do not go like that.** At 16 dB and
 -200 ppm the search takes six attempts before it finds a workable front end,
@@ -215,19 +218,19 @@ and whether the payload came out of the decoder clean:
 | channel | -200 ppm | -80 ppm | +120 ppm |
 |---|---|---|---|
 | 4 dB  | **0** clean | **0** clean | **0** clean |
-| 8 dB  | **0** clean | **0** clean | 6.2e-7 clean |
+| 8 dB  | **0** clean | **0** clean | **0** clean |
 | 12 dB | **0** clean | **0** clean | **0** clean |
-| 16 dB | 1.2e-6 clean | 4.0e-4 errors | 1.5e-4 errors |
-| 20 dB | 2.3e-5 clean | 3.6e-4 errors | 1.9e-5 clean |
-| 24 dB | 6.5e-4 errors | 2.5e-4 errors | 1.2e-4 errors |
+| 16 dB | 3.7e-6 clean | 4.0e-4 errors | 3.5e-4 errors |
+| 20 dB | 1.5e-5 clean | 3.4e-4 errors | 1.2e-5 clean |
+| 24 dB | 7.1e-4 errors | 5.3e-4 errors | 5.2e-4 errors |
 | 28 dB and above | did not come up | did not come up | did not come up |
 
 Bring-up takes 350 ms to 2.7 s, depending on how many front-end operating
 points the search has to try.
 
 **4, 8 and 12 dB are clean at every reference offset -- zero pre-FEC errors
-over 1.5 million bits. 16 to 24 dB is marginal. Above 24 dB the link does not
-come up, and the state machine says so rather than pretending.**
+over 1.5 million bits, all nine cells. 16 to 24 dB is marginal. Above 24 dB the
+link does not come up, and the state machine says so rather than pretending.**
 
 That last part is the change that matters most. Bring-up measures its own error
 rate, decision-directed, before declaring the link up, so a converged-but-wrong
@@ -237,22 +240,38 @@ pre-FEC BER of 7.6e-2.
 
 ### The result worth stopping on
 
-Look at 16 dB / +120 ppm: **pre-FEC 1.5e-4, comfortably inside the 2.4e-4 that
-KP4 is specified against -- and the payload still comes out with errors.**
+At 16 dB and +80 ppm: **pre-FEC 1.942e-4, inside the 2.4e-4 that KP4 is
+specified against -- and one codeword still comes out uncorrectable.**
 
-That is not a contradiction, it is the specification being read too loosely.
-The 2.4e-4 figure assumes errors that are roughly INDEPENDENT. These are not:
-they arrive in bursts, because a DFE that mis-slices feeds the wrong decision
-back and corrupts the next several symbols. Most 20-block windows measure
-exactly zero and an occasional one measures 2.6e-3. A burst long enough to put
-more than 15 corrupted symbols into one codeword is uncorrectable no matter how
-good the average looks.
+That is not a contradiction, it is the specification being read too loosely,
+and `link_sim` now measures the reason rather than asserting it:
+
+```
+  error DISTRIBUTION, not just the rate
+    errors per codeword  1.057  (mean)
+    if INDEPENDENT, expected uncorrectable  1.284e-11 of 298
+    actually uncorrectable                  1
+    ==> the errors are NOT independent. They are BURSTS.
+```
+
+The arithmetic is the whole argument. RS(544,514) corrects any 15 symbol errors
+in a codeword, so what decides whether a link works is not the average error
+rate but the probability that ONE codeword catches more than 15. At 1.057
+errors per codeword, independent errors put that probability at 1.3e-11 -- the
+run should not have produced a single failure in 298 codewords, or in ten
+billion. It produced one.
+
+Errors this bursty come from the DFE: a mis-sliced symbol is fed back as the
+wrong decision and corrupts the next several, so failures arrive in clumps that
+a mean rate cannot see. The observed-to-predicted ratio is about 10^11, which
+is not a modelling quibble but the difference between a design that closes and
+one that does not.
 
 **A mean pre-FEC BER is not sufficient to size a FEC. The error DISTRIBUTION is
 part of the specification, and quoting the average alone is how a link passes on
 paper and fails on the bench.** It is also exactly why the decoder here supports
-erasures: when something else already knows where the burst was, the survivable
-burst length doubles.
+erasures: when something else already knows where the burst was, an erasure
+costs one parity symbol instead of two and the survivable burst length doubles.
 
 ## FEC -- RS(544,514), the KP4 code
 
@@ -365,26 +384,33 @@ Eight lanes, losses spread 10 to 18 dB and reference offsets spread -200 to
 
 ```
   lane  IL@Nyq   ppm     up at    pre-FEC BER   post-FEC   uncorrectable
-  0     10.00    -200    422 ms   0.000e+00     clean      0 / 298
-  1     11.15    -154    362 ms   0.000e+00     clean      0 / 298
-  2     12.29    -109    341 ms   0.000e+00     clean      0 / 298
-  3     13.44     -63    340 ms   0.000e+00     clean      0 / 298
-  4     14.58     -17   2088 ms   0.000e+00     clean      0 / 298
-  5     15.72     +29   2036 ms   6.165e-07     clean      0 / 298
-  6     16.86     +74    never    5.009e-01     --         298 / 298
-  7     18.00    +120   1062 ms   0.000e+00     clean      0 / 298
+  0     10.00    -200     522 ms  0.000e+00     clean      0 / 298
+  1     11.15    -154     372 ms  0.000e+00     clean      0 / 298
+  2     12.29    -109     346 ms  0.000e+00     clean      0 / 298
+  3     13.44     -63     348 ms  0.000e+00     clean      0 / 298
+  4     14.58     -17     682 ms  4.439e-05     clean      0 / 298
+  5     15.72     +29    2028 ms  1.850e-06     clean      0 / 298
+  6     16.86     +74    never    2.308e-01     --       298 / 298
+  7     18.00    +120    1062 ms  3.083e-06     clean      0 / 298
 
-  7 of 8 lanes up
-  supervisor services  3200 each -- the round robin starves nobody
+  7 of 8 lanes up; lanes still down: 6 (FAULT)
+  worst lane 6 at 2.308e-01 -- that is the macro's number
+  supervisor services  6200 each -- the round robin starves nobody
   UNGUARDED RMW        0   (ok)
   W1C RMW bugs         0   (ok)
+  unmapped accesses    0   (ok)
   bytes dropped        0   (ok)
 ```
 
-**Seven lanes carry FEC traffic with zero pre-FEC errors and no uncorrectable
-codewords.** Lane 6 sits at 16.9 dB, in the same band the single-lane sweep is
-weakest in, and it is honest that the macro reports 7 of 8 rather than an
-average.
+**Seven of eight lanes deliver a clean payload -- no uncorrectable codewords --
+at pre-FEC rates from 0 to 4.4e-5.** Four of those seven are at exactly zero;
+the other three are not, and saying "seven lanes with zero pre-FEC errors"
+would have contradicted the table directly above it.
+
+Lane 6 sits at 16.9 dB, in the same band the single-lane sweep is weakest in.
+The macro reports 7 of 8 rather than an average, and its headline number is its
+WORST lane, because a port with one dead lane is a dead port. Averaging eight
+lanes is how a part passes on the bench and fails in the rack.
 
 `macro_sim 8 14 0 4000 2` runs the same thing with the supervisor servicing
 only two lanes per block, which quarters every control loop's bandwidth and
@@ -431,7 +457,7 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | Hardware accumulators never cleared per block | The AGC read a lifetime average, concluded its corrections did nothing, and drove the gain to the rail. |
 | Convergence judged from gradient magnitude | A sign-sign gradient does not shrink as taps settle. Threshold 600 never fired; 5600 fired instantly. Convergence has to be measured from **tap movement**. |
 | `mu_shift` 4 orders of magnitude too large | Gradient ~500/block, `TAP_APPLY_SHIFT` 14, so 16384 blocks per tap code. The link came "up" with untouched taps. |
-| Two consumers of one read-and-clear register | `fw_agc_step()` drained `REG_SYM_CNT` before telemetry read it, so symbol and error counts were always zero. |
+| Two consumers of one read-and-clear register | `fw_agc_step()` drained `REG_SYM_CNT` before telemetry read it, so symbol and error counts were always zero. **This row used to end there, and it was only half true.** The fix had been applied to the bring-up struct and not to the management-bus producer, which went on reading both counters after two other consumers had already drained them -- so every `MGMT_T_COUNTERS` frame on the wire carried 0 symbols and 0 errors for the life of the project, in the one place a real host would have been looking. A bug table is a claim like any other. The frame now carries the accumulated 64-bit count from the link struct, and the error field is deleted rather than reordered, because in steady state the hardware is handed no training symbol and has nothing to count. |
 | Signed left-shift of a negative value | Undefined behaviour. MSVC and gcc both compiled it silently; UBSan caught it on the first CI run. |
 | Include guard `EYE_H` collided with a constant `EYE_H` | -- |
 | ppm drift applied outside the CDR''s phase wrap | The drift is added even while the CDR is disabled during AGC, but the phase is only wrapped inside `cdr_update()`. It ran away unbounded; negative offsets drove it below zero, `cdr_sample()` clamped to index 0, and every symbol in the block read the same sample. Negative ppm failed 100% of the time. |
@@ -456,6 +482,21 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | Every crosstalk aggressor shared one overlap-add tail | The crosstalk filter carries state between blocks, and that state lived on the *victim's* channel. Running three neighbours through it in turn meant the residue left by neighbour -3 at the end of a block was emitted at the start of the next one scaled by neighbour +1's coupling weight. Superposition *inside* a block was exact; only the boundary term was wrong -- which no BER number would ever show. Fixed by using linearity: sum the aggressors' waveforms first and filter once, which is the same arithmetic with one state variable instead of N, and one FFT pass instead of N. |
 | The most-commented feature in the macro was arithmetically inert | Twenty lines explaining that a supervisor servicing 2 of 8 lanes divides every control loop's bandwidth by four -- attached to code where `service` was assigned `n_lanes`, making the scale factor identically 1 and `MACRO_SERVICE` unreferenced. The mechanism was real and the explanation was right; it was simply never exercised. Now a parameter, with the eight-lane case runnable both ways. |
 | `channel_pulse_response()` used the streaming convolution | So a single-shot measurement started from whatever inter-block state the channel was carrying, and then left its own tail behind for the next real block. `hw_lane_init()` calls it to seed the training-reference delay, so the pollution landed on the first block of every link. |
+| The telemetry producer emitted two frames after checking there was room for one | The eye transfer sent its metadata frame and then fell straight through into the first chunk: 64 bytes pushed on a tick that had reserved 32. The surplus is dropped silently by the FIFO, so the host loses the start of an eye and reassembles a corrupt one -- word for word the failure the file header says the backpressure check exists to prevent. It never fired on the bench because every caller wires the bus at four times the peak demand. A guarantee that holds only because the margin is generous is not a guarantee. |
+| One macro-wide status register, published into one lane's aperture | `REG_MGMT_STAT` reports the management FIFO's free space, and it lives inside the per-lane register window. The hardware model wrote it through whichever lane happened to be selected, so on an eight-lane macro exactly one aperture ever held a real value. The other seven read their reset value of zero, concluded the FIFO was permanently full, and deferred forever: **six of eight lanes never emitted a single telemetry byte**, and the bus looked perfectly healthy because almost nothing was pushing. |
+| ...and fixing that exposed the real bug underneath it | With all eight lanes finally transmitting, 474,016 bytes were dropped. Publishing the free count once per block is a SNAPSHOT, and eight producers then each reserve against the same stale number: every lane reads "512 free", every lane pushes 32 bytes, and seven of them overrun a FIFO whose check they all passed individually. On silicon that register is combinational off the FIFO pointers and a read returns the state at the moment of the read; the model now does the same, so a producer's check reflects what the producers ahead of it already took. Dropped bytes went to zero. **The first fix did not cause this -- it revealed it.** |
+| Telemetry state was file-static while every other firmware module was per-lane | `fw_adapt` and `fw_agc` both keep `[HAL_MAX_LANES]` contexts, with header comments explaining why, and the README says every loop accumulator exists per lane. `fw_telem` kept its sequence number, round-robin phase and eye byte-offset as file statics. Eight lanes sharing one phase means each lane advances it by one, so no lane ever sends a complete record set, and eight lanes take turns writing bytes into what the host reassembles as a single eye. |
+| A tap pinned at its rail was reported as converged | Convergence was judged purely on how far the applied taps moved. Once the accumulator drives past the width of the hardware field the published value pins and stops changing, so the movement test sees a perfectly quiet loop while the LMS is still demanding, every block, a filter the register cannot express. **This is the same trap as the CDR lock detector's anti-windup clamp**, already in this table: a quantity held still by a limiter is indistinguishable from one held still by convergence, and only the limiter's state tells them apart. Found by writing the negative half of a test that had only ever asserted the positive one. |
+| The AFE forgot its filter state at every block boundary | `bq1_lowpass()` and `bq1_zero_pole()` memset the whole biquad, which contains `x1` and `y1` -- the filter's memory -- along with the coefficients. `hw_apply_afe_regs()` re-programs the codes at the start of every block whether or not they changed, so the CTLE and TIA began each 4096-symbol block filtering against silence. This is the identical defect the channel had, two rows down, and it survived because a discontinuity every 4096 symbols raises the error floor slightly instead of breaking anything visibly. Setting coefficients is not resetting a filter. |
+| Only lane 0's PLL was ever initialised | `pll_init()` was called from `hw_lane_attach_platform()`, which a macro calls once. Every other lane kept the zero-filled struct, so `settle_blocks` was 0 and the PLL declared lock on its first step: seven of eight lanes skipped the settling the model exists to represent, and their PLL_LOCK timeout was unreachable. A PLL is per-lane analogue hardware and is now built with the rest of the lane. |
+| Through and crosstalk responses were each given their own time origin | `resp_to_impulse()` finds a response's leading edge and shifts it to the start of the buffer. It was called twice -- once for the through path, once for FEXT -- each computing its own origin from its own peak, and the crosstalk shift was thrown away into a variable named `dummy`. The two responses came out of one file describing one structure, so their RELATIVE arrival is the entire physical content, and removing a different bulk delay from each destroys exactly that. The aggressor landed more than a UI away from where it couples. |
+| The Touchstone reader mis-framed any line longer than its buffer | `fgets` stops at the buffer, not at the newline, and every piece of per-line state is line-scoped: `!` starts a comment that runs to end of line, `#` marks an option line. A long `!` banner -- vendor tools emit them -- had its first chunk correctly discarded and its tail parsed as measurement data, because the `!` was no longer in it. It parsed, it returned success, and every number after it was wrong. |
+| `corrected_symbols` counted errata positions, not corrections | The erasure decoder returns every erasure position plus every located error. An erased symbol that was not actually corrupt has an error value of zero XORed into it -- no correction happens -- but it was still counted. With erasures driven by a soft flag that over-flags, the overstatement equals the number of false flags, which is precisely the quantity the erasure-economics experiment exists to measure. The header already said "number of symbols corrected"; the code now honours it. |
+| `fec_probe` scored silent miscorrections as successes | Past the correction budget a Reed-Solomon decoder can land on a DIFFERENT valid codeword, return success, and hand up wrong data. A neighbouring codeword has zero syndrome by construction, so no self-check inside the decoder can catch it. Part 3 scored on the return value alone and counted those as successes -- flattering the decoder exactly where it behaves worst. It now compares against the transmitted word, as part 4 always did, and reports miscorrections in their own column. They are not hypothetical: **11 of them at margin 0.030.** |
+| Two tests that could not fail, in the file that polices exactly that | The Touchstone transpose check re-asserted a variable computed eleven lines earlier, against a fixture whose S21 and S12 were both 0.9 -- so a row-major read returned the identical number and the check passed whether or not the column-major wart was handled at all. And `fw_adapt_converged()` was only ever asserted to return 1, which `return 1;` satisfies. Both are fixed with mutation evidence: disabling the transpose now produces 3 failures where it produced 0, and removing the railed-tap check produces 1. |
+| `post_bit_errors` and `uncorrectable` were stuck-at-zero-proof | Every PCS case in the suite was a clean one, so both counters would have passed while hard-wired to zero -- and `link_sim`'s CI exit code is built on `uncorrectable == 0`. The suite now drives a codeword one symbol past the budget and requires the failure to be declared and the residual errors to survive into the payload. A counter is only worth trusting at zero if it has been seen to be non-zero. |
+| `mgmt_host` never produced `HW_MODE_VERIFY` | It selected the datapath mode with `? 1u : 0u` where `link_sim` uses a three-way enum, so `LS_EQ_VERIFY` ran in data mode -- where the hardware is handed no training symbol, counts no errors, and publishes zero. Verification measured a BER of zero and passed unconditionally: in that binary, the one check whose entire purpose is to reject a converged-but-wrong receiver could not fail. |
+| The channel model kept 48 UI and the header promised "hundreds" | `channel.h` said the S-parameter path carries echoes appearing tens or hundreds of UI after the cursor. The builder keeps `span_ui * OSR` taps and discards the rest, and every caller passes 48. `ch_probe` compounded it: its comment claimed a longer output buffer would reveal what the channel does beyond the equaliser's window, which is arithmetically impossible against a truncated response -- and it reported the truncation as "no reflections in this channel". The shipped file's echo is at 11 UI and survives; a longer stub would not, and the tool would have called that a clean channel. |
 | `channel_apply()` took a `const channel_t *` and cast the const away inside | The function is the STREAMING path: it keeps the convolution tail that runs past the end of one block and adds it to the front of the next. That is state, deliberately, and the signature promised the opposite of it. Casting away a const the caller supplied is undefined behaviour if the object really is const, but the worse problem is what the signature invites: sharing one channel between two streams looks safe and silently splices their tails together. The fix is not a cast, it is telling the truth in the prototype. Found by `-Wcast-qual` -- 16 warnings, all this one call, which is the argument for running a pedantic pass even when it is not a gate. |
 | The register model was quietly more forgiving than the silicon it stands in for | An offset past the end of the aperture folded back into it and a misaligned one was rounded down, both silently. On a real part the first reaches a neighbouring lane or an unmapped address and the second is a bus fault, so firmware that computed a bad address would pass every test here and fault on the bench. Nothing was doing it -- the counter reads zero across the full link and macro runs -- which is the point: the check is worth having *because* it currently passes, and a model that errs toward permissive hides exactly the class of bug it exists to catch. Counted now, asserted in the tests and in both end-to-end gates. |
 | A metric that could not fail, still printing after being "replaced" | The README said the vacuous pre-FEC counter had been replaced by a real measurement. The real measurement was added; the old one was left in, still printing a confident `0.000e+00` two lines below it. Removed, and the telemetry field with it, because a number that cannot be non-zero is worse than no number -- it gets trusted. |
@@ -479,9 +520,10 @@ firmware: it hunts for framing byte by byte, validates every CRC, tracks
 sequence gaps, and reassembles the eye from chunks.
 
 ```
-  frames ok / bad     205 / 0
+  frames ok / bad     199 / 0
   sequence gaps       0
   bytes dropped by HW 0
+  counters            745108 symbols, up in 2112 ms, 62 faults
   FFE taps              -1   +0   -3  +19   -3   -1   -1   -1
   eye reassembled     768/768 bytes (32 x 24)
 ```

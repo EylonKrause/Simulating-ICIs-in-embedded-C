@@ -126,6 +126,7 @@ int32_t fw_adapt_activity(void);        /* last block's summed |gradient|    */
  * register interface and cannot see each other. */
 unsigned fw_adapt_cursor_tap(void);
 
+void     fw_telem_select_lane(unsigned lane);
 void     fw_telem_reset(void);
 void     fw_telem_step(const fw_link_t *L);
 uint32_t fw_telem_frames(void);

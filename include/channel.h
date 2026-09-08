@@ -18,10 +18,21 @@
  *     project uses, and it carries three things the fitted model cannot:
  *
  *       reflections   Every impedance discontinuity returns energy. It comes
- *                     back as a long-delayed echo, appearing in the pulse
- *                     response tens or hundreds of UI after the cursor --
- *                     outside any equaliser's span, and invisible to a smooth
- *                     monotonic loss fit.
+ *                     back as a long-delayed echo, tens of UI after the
+ *                     cursor -- outside any equaliser's span, and invisible
+ *                     to a smooth monotonic loss fit.
+ *
+ *                     WITH A CAVEAT THIS HEADER USED TO OMIT: the model keeps
+ *                     `span_ui` unit intervals of impulse response and throws
+ *                     the rest away at build time. Every caller here passes
+ *                     48, and the cursor lands around 10 UI in, so echoes
+ *                     later than roughly 38 UI past the cursor are not in the
+ *                     model at all. The shipped file's echo is at 11 UI and
+ *                     survives; a longer stub or a longer discontinuity
+ *                     spacing would not, and the model would show a clean
+ *                     channel rather than a truncated one. Raise span_ui to
+ *                     study those -- it costs memory and convolution time,
+ *                     which is why it is not simply large.
  *
  *       via stubs     The unused barrel of a through via is a quarter-wave
  *                     resonator, putting a deep narrow notch in the insertion

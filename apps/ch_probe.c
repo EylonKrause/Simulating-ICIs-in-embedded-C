@@ -85,9 +85,15 @@ static void print_long_tail(const channel_t *ch, unsigned phase)
     if (p == NULL) {
         return;
     }
-    /* The stored impulse response is only SPAN_UI long, so convolve against a
-     * longer buffer explicitly: what we want to see is what the channel does
-     * beyond the window the equaliser gets to work in. */
+    /* A LONGER OUTPUT BUFFER CANNOT RECOVER TAPS THE MODEL NEVER STORED.
+     *
+     * This comment used to say the opposite -- that convolving against a
+     * longer buffer shows what the channel does beyond the equaliser's window.
+     * It does not. channel_build*() keeps SPAN_UI*OSR taps and discards the
+     * rest, so the convolution is identically zero past SPAN_UI regardless of
+     * how much room the output has. The display below is therefore bounded by
+     * the model's window, not by the channel's physics, and it says so rather
+     * than reporting the truncation as "no reflections in this channel". */
     channel_pulse_response(ch, p, np);
 
     double peak = 0.0;
@@ -100,9 +106,11 @@ static void print_long_tail(const channel_t *ch, unsigned phase)
     }
     const size_t cur_ui = pk / OSR;
 
-    printf("\n  long tail: everything above 0.5%% of the cursor, out to %u UI\n",
-           LONG_UI);
+    printf("\n  long tail: everything above 0.5%% of the cursor\n");
     printf("  (a fitted loss model decays smoothly and has nothing out here)\n");
+    printf("  NOTE: the model retains %u UI of impulse response, so this can\n"
+           "        only show echoes up to about %u UI past the cursor.\n",
+           SPAN_UI, (unsigned)(SPAN_UI - cur_ui - 1u));
     unsigned shown = 0u;
     for (size_t ui = cur_ui + 1u; ui < LONG_UI; ++ui) {
         const size_t idx = ui * OSR + phase;
@@ -123,7 +131,10 @@ static void print_long_tail(const channel_t *ch, unsigned phase)
         }
     }
     if (shown == 0u) {
-        printf("    nothing above the floor -- no reflections in this channel\n");
+        printf("    nothing above the floor within the %u UI the model keeps\n",
+               SPAN_UI);
+        printf("    (not the same as \"no reflections\": an echo later than the\n");
+        printf("     window was discarded when the channel was built)\n");
     }
     free(p);
 }

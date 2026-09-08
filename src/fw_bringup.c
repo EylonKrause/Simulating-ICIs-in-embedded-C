@@ -130,6 +130,7 @@ void fw_select_lane(unsigned lane)
     hal_select_lane(lane);
     fw_adapt_select_lane(lane);
     fw_agc_select_lane(lane);
+    fw_telem_select_lane(lane);
 }
 
 /* CHOOSE THE FRONT END FROM WHAT THE AGC JUST MEASURED.

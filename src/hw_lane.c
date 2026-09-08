@@ -58,6 +58,11 @@ static int hw_lane_finish_init(hw_lane_t *L, afe_mode_t mode, double ppm)
     tx_init(&L->tx, 0xC0FFEEu, -0.10, -0.18);
     afe_init(&L->afe, mode);
     eq_init(&L->eq);
+    /* Per-lane analogue hardware, so it is built with the rest of the lane.
+     * It used to be initialised in hw_lane_attach_platform(), which a macro
+     * calls only for lane 0 -- leaving every other lane a PLL that reported
+     * lock on its first step. */
+    pll_init(&L->pll, 8u);          /* ~8 blocks to settle */
     /* Loop constants chosen an order of magnitude apart from the equaliser's
      * update rate -- see the bandwidth-separation note in fw_bringup.c. */
     /* Type-2 gains, MEASURED not guessed -- see apps/cdr_probe.c.
@@ -580,10 +585,20 @@ static void hw_write_hook(uint32_t off, uint32_t val)
 
 void hw_lane_attach_platform(hw_lane_t *L, unsigned mgmt_bytes_per_block)
 {
+    /* MACRO-WIDE WIRING ONLY. The management FIFO and the eye capture window
+     * are one per macro, so this is called once.
+     *
+     * The PLL is NOT macro-wide -- it is per-lane analogue hardware, and it
+     * used to be initialised here. On a macro that meant lanes 1..7 kept the
+     * zero-filled pll_t from hw_lane_init(), so settle_blocks was 0 and
+     * pll_step() declared lock on its very first call. Seven of eight lanes
+     * skipped the settling the whole PLL model exists to represent, and the
+     * bring-up FSM's PLL_LOCK timeout was unreachable for them. It is now
+     * initialised per lane, in hw_lane_init(), where the rest of that lane's
+     * hardware is built. */
     g_hooked_lane = L;
     mgmt_bus_init(mgmt_bytes_per_block);
     hal_set_write_hook(hw_write_hook);
-    pll_init(&L->pll, 8u);          /* ~8 blocks to settle */
 }
 
 void hw_lane_load_eye_ram(hw_lane_t *L, const struct eye_s *eye)

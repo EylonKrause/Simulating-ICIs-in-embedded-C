@@ -273,7 +273,40 @@ int fw_adapt_step(void)
         g_ctx[g_ln].prev_tap[j] = t;
     }
 
-    if (moved <= CONV_TAP_DELTA) {
+    /* A SATURATED TAP HAS STOPPED MOVING. THAT IS NOT CONVERGENCE.
+     *
+     * The applied tap is the accumulator's high bits, clamped to the width of
+     * the hardware field. Once the accumulator drives past that clamp the
+     * published value pins at the rail and stops changing, so `moved` goes to
+     * zero and the loop declares itself settled -- while the LMS is still
+     * asking, every block, for a filter the register cannot express.
+     *
+     * This is the same mistake as the CDR's old lock detector, which tested
+     * whether the frequency estimate had stopped moving and was therefore
+     * GUARANTEED to pass the moment the anti-windup clamp engaged, because a
+     * clamped integrator has stopped by definition. Both are the general trap:
+     * a quantity held still by a limiter looks identical to one held still by
+     * convergence, and only the limiter's state distinguishes them.
+     *
+     * So a tap sitting at its rail while the accumulator keeps pushing it
+     * outward resets the counter. A tap that merely happens to sit at the rail
+     * in equilibrium does not -- the test is on the accumulator's demand, not
+     * on the published value. */
+    int railed = 0;
+    for (unsigned i = 0; i < NUM_FFE_TAPS && !railed; ++i) {
+        const int32_t want = g_ctx[g_ln].ffe_acc[i] >> TAP_APPLY_SHIFT;
+        if (want > TAP_APPLY_MAX || want < TAP_APPLY_MIN) {
+            railed = 1;
+        }
+    }
+    for (unsigned i = 0; i < NUM_DFE_TAPS && !railed; ++i) {
+        const int32_t want = g_ctx[g_ln].dfe_acc[i] >> TAP_APPLY_SHIFT;
+        if (want > TAP_APPLY_MAX || want < TAP_APPLY_MIN) {
+            railed = 1;
+        }
+    }
+
+    if (moved <= CONV_TAP_DELTA && !railed) {
         if (g_ctx[g_ln].settled < CONV_BLOCKS) {
             g_ctx[g_ln].settled++;
         }

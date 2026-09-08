@@ -189,6 +189,56 @@ int main(int argc, char **argv)
             printf("    post-FEC BER        %.3e\n", pcs_post_fec_ber(pcs));
         }
     }
+    /* ---- ARE THE ERRORS INDEPENDENT? ------------------------------------
+     *
+     * The 2.4e-4 pre-FEC limit is not a property of the number alone. It
+     * assumes errors that arrive INDEPENDENTLY, and the whole design of a
+     * block code rests on that: RS(544,514) corrects any 15 symbol errors in a
+     * codeword, so what matters is not the average rate but the probability
+     * that one codeword catches more than 15.
+     *
+     * That assumption is testable with what has already been measured here,
+     * and it costs nothing to test. Take the observed pre-FEC bit error rate,
+     * assume the errors are independent, and ask how many codewords SHOULD
+     * have been uncorrectable. Then compare with how many actually were.
+     *
+     * Independent errors put the count per codeword at Poisson(lambda) with
+     * lambda = errors per codeword; each bit error is charged to its own
+     * symbol, which is the assumption most favourable to independence. If the
+     * observed failures wildly exceed the prediction, the errors are not
+     * independent -- they are bursts, which is exactly what a DFE produces
+     * when it mis-slices and feeds the wrong decision back.
+     *
+     * This is the difference between a link that passes on paper and one that
+     * works on the bench, and it is why the decoder here supports erasures. */
+    if (pcs->codewords > 0u && pcs->pre_bit_errors > 0u) {
+        const double lambda = (double)pcs->pre_bit_errors / (double)pcs->codewords;
+        /* P(X > RS_T) for X ~ Poisson(lambda), by summing the head. */
+        double term = exp(-lambda);
+        double head = term;
+        for (unsigned k = 1u; k <= RS_T; ++k) {
+            term *= lambda / (double)k;
+            head += term;
+        }
+        const double p_fail = (head < 1.0) ? (1.0 - head) : 0.0;
+        const double expected = p_fail * (double)pcs->codewords;
+
+        printf("\n  error DISTRIBUTION, not just the rate\n");
+        printf("    errors per codeword  %.3f  (mean)\n", lambda);
+        printf("    if INDEPENDENT, expected uncorrectable  %.3e of %llu\n",
+               expected, (unsigned long long)pcs->codewords);
+        printf("    actually uncorrectable                  %llu\n",
+               (unsigned long long)pcs->uncorrectable);
+        if (pcs->uncorrectable > 0u && expected < 1e-3) {
+            printf("    ==> the errors are NOT independent. They are BURSTS.\n");
+            printf("        A mean BER cannot size a FEC on its own: this run\n");
+            printf("        fails codewords that independent errors at the same\n");
+            printf("        average rate would essentially never fail.\n");
+        } else if (pcs->uncorrectable == 0u) {
+            printf("    ==> no codeword exceeded the correction budget.\n");
+        }
+    }
+
     /* KP4 is specified to deliver better than 1e-15 post-FEC given a pre-FEC
      * BER at or below 2.4e-4. That one number is the contract between the
      * SerDes and the PCS, and it is why the analogue side is allowed to hand

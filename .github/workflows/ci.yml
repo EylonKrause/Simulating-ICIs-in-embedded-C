@@ -68,8 +68,13 @@ jobs:
       - name: A lane brings itself up and the payload decodes
         run: ./out/link_sim 12 -80
 
+      # 11 dB base with the usual per-lane spread: every lane comes up with
+      # zero pre-FEC errors, deterministically. Deliberately NOT run at 14 dB,
+      # where the spread puts the worst lane in the 16-24 dB marginal band the
+      # README documents -- a gate that sits on the edge of a known-marginal
+      # region tells you about the region, not about your change.
       - name: Four lanes share one supervisor and all come up
-        run: ./out/macro_sim 4 14 0 1500
+        run: ./out/macro_sim 4 11 0 1500
 
       # An .s4p is external input. This is the published synthesised file, read
       # end to end: parse, interpolate, build an impulse response.

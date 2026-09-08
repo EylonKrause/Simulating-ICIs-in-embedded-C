@@ -7,9 +7,27 @@
 
 /* ---- first-order sections via the bilinear transform --------------------- */
 /* H(s) = 1 / (1 + s/wp)  ->  bilinear  ->  y[n] = b0 x[n] + b1 x[n-1] - a1 y[n-1] */
+/* SETTING COEFFICIENTS IS NOT THE SAME AS RESETTING THE FILTER.
+ *
+ * Both of these used to memset the whole biquad1_t, which contains x1 and y1 --
+ * the filter's memory -- along with b0, b1 and a1. hw_apply_afe_regs() runs at
+ * the start of every block and re-programs the codes whether or not they have
+ * changed, so the analogue front end began each 4096-symbol block with no
+ * history: the first samples of every block were filtered against silence.
+ *
+ * That is the identical defect the channel had, and it is in this project's
+ * bug table for exactly that reason. It survived here because a discontinuity
+ * every 4096 symbols is a small effect that raises the error floor slightly
+ * rather than breaking anything visibly -- which is precisely why a model has
+ * to be right about state rather than approximately right.
+ *
+ * afe_init() zeroes the struct once, at construction. After that, a code
+ * change moves the poles and zeros of a filter that keeps running. */
 void bq1_lowpass(biquad1_t *f, double fc_ghz)
 {
-    memset(f, 0, sizeof(*f));
+    f->b0 = 0.0;
+    f->b1 = 0.0;
+    f->a1 = 0.0;
     if (fc_ghz >= FS_GHZ / 2.0) {          /* above Nyquist: pass through */
         f->b0 = 1.0;
         return;
@@ -25,7 +43,9 @@ void bq1_lowpass(biquad1_t *f, double fc_ghz)
 /* H(s) = (1 + s/wz) / (1 + s/wp).  DC gain 1, high-frequency gain wp/wz. */
 void bq1_zero_pole(biquad1_t *f, double fz_ghz, double fp_ghz)
 {
-    memset(f, 0, sizeof(*f));
+    f->b0 = 0.0;
+    f->b1 = 0.0;
+    f->a1 = 0.0;
     if (fz_ghz <= 0.0 || fp_ghz <= 0.0) {
         f->b0 = 1.0;
         return;

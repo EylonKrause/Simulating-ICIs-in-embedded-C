@@ -330,6 +330,7 @@ int fec_decode_erasures(uint16_t *cw, const uint8_t *erased,
     }
 
     int ok = 1;
+    unsigned ncorr = 0u;        /* positions whose error value was NON-ZERO */
     for (unsigned r = 0; r < nroots; ++r) {
         const uint16_t xin = xinv[r];
 
@@ -350,7 +351,11 @@ int fec_decode_erasures(uint16_t *cw, const uint8_t *erased,
             break;
         }
         /* The first root of g is alpha^1, so the X^(1-b) factor is unity. */
-        cw[pos[r]] = (uint16_t)(cw[pos[r]] ^ gf_div(num, den));
+        const uint16_t e = gf_div(num, den);
+        if (e != 0u) {
+            ncorr++;
+        }
+        cw[pos[r]] = (uint16_t)(cw[pos[r]] ^ e);
     }
 
     if (ok) {
@@ -373,9 +378,22 @@ int fec_decode_erasures(uint16_t *cw, const uint8_t *erased,
         *n_erasures = ne;
     }
     g_st.codewords++;
-    g_st.corrected_symbols += nroots;
+    /* COUNT CORRECTIONS, NOT ERRATA POSITIONS.
+     *
+     * `nroots` is gdeg + L: every erasure position plus every located error.
+     * An erased symbol that was not actually corrupt gets an error value of
+     * zero XORed into it -- no correction happens -- but it was still an
+     * errata position, so counting nroots here reported work that was never
+     * done. With erasure decoding driven by a soft flag that over-flags (the
+     * measured case in fec_probe part 3), the overstatement is exactly the
+     * number of false flags, which is precisely the quantity you are trying to
+     * measure when you evaluate whether the flags are worth having.
+     *
+     * nroots is still the right thing for the pdeg consistency check above;
+     * it is the wrong thing for a statistic named "corrected". */
+    g_st.corrected_symbols += ncorr;
     g_st.erasures_used += ne;
-    return (int)nroots;
+    return (int)ncorr;
 }
 
 int fec_decode(uint16_t *cw)

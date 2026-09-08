@@ -34,7 +34,8 @@ typedef struct {
     unsigned have_seq;
     uint8_t  taps[NUM_FFE_TAPS + NUM_DFE_TAPS];
     unsigned have_taps;
-    uint32_t sym, err, ms_to_up, faults;
+    uint64_t sym;                 /* accumulated symbols, 64-bit on the wire */
+    uint32_t ms_to_up, faults;
     unsigned state, status, vga, tia, ctle, pll;
 } host_t;
 
@@ -66,8 +67,14 @@ static void host_frame(host_t *H, const uint8_t *f)
         break;
     case MGMT_T_COUNTERS:
         if (len >= 16u) {
-            memcpy(&H->sym, &p[0], 4);
-            memcpy(&H->err, &p[4], 4);
+            /* 64-bit accumulated symbol count. It used to be two 32-bit
+             * fields, symbols and errors, both read straight from read-clear
+             * registers that another consumer had already drained -- so both
+             * arrived as zero on every frame. The error field is gone rather
+             * than reordered: in steady state the hardware is given no
+             * training symbol to compare against, so it has nothing to count.
+             * See the note in fw_telem.c. */
+            memcpy(&H->sym, &p[0], 8);
             memcpy(&H->ms_to_up, &p[8], 4);
             memcpy(&H->faults, &p[12], 4);
         }
@@ -152,7 +159,20 @@ int main(int argc, char **argv)
 
     uint32_t t = 0u;
     for (; t < MAX_TICKS && !fw_is_up(&fw); ++t) {
-        hw_lane_run(&hw, (fw.state == LS_EQ_TRAIN || fw.state == LS_CDR_LOCK) ? 1u : 0u);
+        /* THE SAME THREE-WAY SELECTION link_sim MAKES, and for the same
+         * reason. This used to collapse to a two-way `? 1u : 0u`, which never
+         * produced HW_MODE_VERIFY -- so LS_EQ_VERIFY ran the datapath in data
+         * mode, where the hardware is handed no training symbol, counts no
+         * errors, and publishes REG_ERR_CNT = 0 every block. Verification then
+         * measured a BER of zero and passed unconditionally: the one check in
+         * the state machine whose entire purpose is to reject a converged-but-
+         * wrong receiver could not fail in this binary. Two enumerators and a
+         * literal 1u are not the same thing. */
+        const hw_mode_t run_mode =
+            (fw.state == LS_EQ_TRAIN || fw.state == LS_CDR_LOCK) ? HW_MODE_TRAIN
+          : (fw.state == LS_EQ_VERIFY)                            ? HW_MODE_VERIFY
+                                                                  : HW_MODE_DATA;
+        hw_lane_run(&hw, run_mode);
         fw_tick(&fw, t);
         host_feed(&H, buf, mgmt_wire_read(buf, sizeof(buf)));
     }
@@ -168,7 +188,7 @@ int main(int argc, char **argv)
     hw_lane_load_eye_ram(&hw, &eye);
 
     for (unsigned k = 0; k < 200u; ++k) {
-        hw_lane_run(&hw, 0u);
+        hw_lane_run(&hw, HW_MODE_DATA);
         fw_tick(&fw, t + k);
         host_feed(&H, buf, mgmt_wire_read(buf, sizeof(buf)));
     }
@@ -185,8 +205,15 @@ int main(int argc, char **argv)
     printf("    state / status      %s / 0x%02X   PLL %s\n",
            fw_state_name((link_state_t)H.state), H.status, H.pll ? "locked" : "unlocked");
     printf("    AFE codes           VGA %u  TIA %u  CTLE %u\n", H.vga, H.tia, H.ctle);
-    printf("    counters            %u symbols, %u errors, up in %u ms, %u faults\n",
-           H.sym, H.err, H.ms_to_up, H.faults);
+    printf("    counters            %llu symbols, up in %u ms, %u faults\n",
+           (unsigned long long)H.sym, H.ms_to_up, H.faults);
+    /* The symbol count is the check that matters here: it is the field that
+     * used to arrive as a confident zero on every frame because two other
+     * consumers had already drained the read-clear register it came from. A
+     * non-zero value means the frame carries something the host could not
+     * have guessed. */
+    printf("    counters non-zero   %s\n",
+           (H.sym > 0u) ? "yes" : "NO  <-- BUG: the counters frame is empty");
     if (H.have_taps) {
         printf("    FFE taps           ");
         for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) {

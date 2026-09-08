@@ -86,12 +86,43 @@ int ts_load(touchstone_t *ts, const char *path, unsigned ports)
     char line[1024];
     size_t have = 0u;               /* numbers gathered for the current point */
     size_t npt  = 0u;
+    /* fgets STOPS AT THE BUFFER, NOT AT THE NEWLINE, and every piece of
+     * per-line state below is line-scoped: '!' starts a comment that runs to
+     * end of line, and '#' marks an option line. Treating the tail of a split
+     * line as a fresh line loses both.
+     *
+     * The concrete failure is a long '!' banner -- vendor tools emit them, and
+     * 1024 bytes of provenance text is not unusual. The first chunk is
+     * correctly discarded as a comment; the tail is not, because the '!' is no
+     * longer in it. Whatever numbers happen to sit in that tail are then
+     * parsed as measurement data and shifted into the sweep. It parses, it
+     * returns success, and every number after it is wrong.
+     *
+     * So: track whether the physical line ended, and while it has not, keep
+     * applying the line's state to its continuation chunks. */
+    int in_comment = 0;             /* the rest of this physical line is a comment */
+    int in_option  = 0;             /* the rest of this physical line is '#' options */
+    int continuing = 0;             /* previous chunk did not reach a newline    */
 
     while (fgets(line, (int)sizeof(line), fp) != NULL) {
-        /* Strip comments. '!' starts one anywhere on the line. */
+        const int line_ended = (strchr(line, '\n') != NULL) || feof(fp);
+        const int is_tail    = continuing;
+        continuing = !line_ended;
+
+        if (is_tail && in_comment) {
+            /* Still inside the comment that began in an earlier chunk. */
+            if (line_ended) { in_comment = 0; }
+            continue;
+        }
+
+        /* Strip comments. '!' starts one anywhere on the line, and it runs to
+         * the end of the PHYSICAL line -- across a buffer split. */
         char *bang = strchr(line, '!');
         if (bang != NULL) {
             *bang = '\0';
+            in_comment = !line_ended;
+        } else if (line_ended) {
+            in_comment = 0;
         }
 
         char *p = line;
@@ -102,7 +133,21 @@ int ts_load(touchstone_t *ts, const char *path, unsigned ports)
             continue;
         }
 
-        if (*p == '#') {
+        if (is_tail) {
+            /* A continuation chunk of a data line is fine to keep parsing --
+             * the record accumulates across lines anyway -- but it must not be
+             * re-examined for a '#' option marker, and a continuation of an
+             * option line is not data. */
+            if (in_option) {
+                if (line_ended) { in_option = 0; }
+                continue;
+            }
+        } else {
+            in_option = 0;
+        }
+
+        if (*p == '#' && !is_tail) {
+            in_option = !line_ended;
             /* # <unit> <parameter> <format> R <z0> -- any subset, any order */
             char opt[256];
             (void)snprintf(opt, sizeof(opt), "%s", p + 1);

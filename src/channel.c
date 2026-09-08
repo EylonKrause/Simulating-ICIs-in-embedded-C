@@ -234,7 +234,11 @@ static void resp_at(const resp_t *r, double f_hz, double *mag, double *ph)
 }
 
 /* Turn one response into a real impulse response on the simulation grid. */
-static real_t *resp_to_impulse(const resp_t *r, size_t n_out, double *bulk_ui)
+/* `force_start` < 0 means "find the time origin from this response". A caller
+ * that has already fixed an origin passes it in, so a second response is
+ * placed on the SAME time axis rather than being re-centred on its own peak. */
+static real_t *resp_to_impulse(const resp_t *r, size_t n_out, double *bulk_ui,
+                               long force_start)
 {
     cplx *buf = (cplx *)calloc(SYNTH_N, sizeof(cplx));
     real_t *h = (real_t *)calloc(n_out, sizeof(real_t));
@@ -278,24 +282,42 @@ static real_t *resp_to_impulse(const resp_t *r, size_t n_out, double *bulk_ui)
      * removed is the delay BETWEEN features: reflections arrive at two and
      * three times the one-way flight time, and a constant shift preserves
      * those intervals exactly. */
-    size_t pk = 0u;
-    double peak = 0.0;
-    for (size_t i = 0; i < SYNTH_N; ++i) {
-        const double v = fabs(buf[i].re);
-        if (v > peak) {
-            peak = v;
-            pk = i;
+    size_t start;
+    if (force_start >= 0) {
+        /* THE CALLER OWNS THE TIME ORIGIN.
+         *
+         * This matters for crosstalk. A FEXT response has its own peak at its
+         * own delay, so letting it find its own origin re-centres it on that
+         * peak -- and the aggressor's energy then arrives at the victim's
+         * cursor instead of wherever the geometry actually puts it. The two
+         * responses came out of one S-parameter file describing one structure;
+         * their RELATIVE arrival is the physical content, and independently
+         * removing a different bulk delay from each destroys exactly that.
+         *
+         * Measured on the shipped 4-port file, the two independently chosen
+         * origins differ by more than a UI, which silently moves the crosstalk
+         * to a different symbol than the one it couples into. */
+        start = (size_t)force_start;
+    } else {
+        size_t pk = 0u;
+        double peak = 0.0;
+        for (size_t i = 0; i < SYNTH_N; ++i) {
+            const double v = fabs(buf[i].re);
+            if (v > peak) {
+                peak = v;
+                pk = i;
+            }
         }
+        /* Back off to where the leading edge actually starts, so genuine
+         * precursors survive the shift. */
+        start = pk;
+        const double edge = peak * 0.02;
+        while (start > 0u && fabs(buf[start - 1u].re) > edge) {
+            --start;
+        }
+        const size_t guard = 2u * OSR;
+        start = (start > guard) ? (start - guard) : 0u;
     }
-    /* Back off to where the leading edge actually starts, so genuine
-     * precursors survive the shift. */
-    size_t start = pk;
-    const double edge = peak * 0.02;
-    while (start > 0u && fabs(buf[start - 1u].re) > edge) {
-        --start;
-    }
-    const size_t guard = 2u * OSR;
-    start = (start > guard) ? (start - guard) : 0u;
 
     for (size_t i = 0; i < n_out; ++i) {
         const size_t j = start + i;
@@ -336,7 +358,7 @@ int channel_build_from_sparam(channel_t *ch, const char *path,
         ts_free(&ts);
         return -1;
     }
-    ch->h = resp_to_impulse(&thru, n, &ch->bulk_delay_ui);
+    ch->h = resp_to_impulse(&thru, n, &ch->bulk_delay_ui, -1);
     resp_free(&thru);
     if (ch->h == NULL) {
         ts_free(&ts);
@@ -348,8 +370,11 @@ int channel_build_from_sparam(channel_t *ch, const char *path,
         pm.xt_in <= ts.ports && pm.xt_out <= ts.ports) {
         resp_t xt;
         if (resp_build(&xt, &ts, pm.xt_out, pm.xt_in) == 0) {
-            double dummy = 0.0;
-            ch->hx = resp_to_impulse(&xt, n, &dummy);
+            /* Same time origin as the through path. See resp_to_impulse. */
+            const long origin =
+                (long)(ch->bulk_delay_ui * (double)OSR + 0.5);
+            double shared = 0.0;
+            ch->hx = resp_to_impulse(&xt, n, &shared, origin);
             ch->nx = (ch->hx != NULL) ? n : 0u;
             resp_free(&xt);
         }

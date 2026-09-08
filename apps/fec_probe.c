@@ -355,13 +355,15 @@ static void erasure_economics(unsigned n_cw, double sigma)
 
     printf("  3. erasure economics on AWGN (sigma = %.3f, %u codewords)\n\n",
            sigma, n_cw);
-    printf("     %-8s %-8s %-9s %-9s %-9s %s\n",
-           "margin", "flags", "errors", "covered", "hard fail", "soft fail");
-    printf("     ---------------------------------------------------------------\n");
+    printf("     %-8s %-8s %-8s %-8s %-10s %-10s %s\n",
+           "margin", "flags", "errors", "covered", "hard fail", "soft fail",
+           "silent miscorrect (h/s)");
+    printf("     --------------------------------------------------------------------------\n");
 
     for (unsigned m = 0; m < NM; ++m) {
         uint64_t flags = 0u, errs = 0u, covered = 0u;
         uint64_t fail_hard = 0u, fail_soft = 0u, overflow = 0u;
+        uint64_t miscorr_hard = 0u, miscorr_soft = 0u;
 
         for (unsigned c = 0; c < n_cw; ++c) {
             random_message(msg);
@@ -384,23 +386,59 @@ static void erasure_economics(unsigned n_cw, double sigma)
                 overflow++;
             }
 
+            /* A DECODE THAT RETURNS >= 0 HAS NOT NECESSARILY SUCCEEDED.
+             *
+             * Beyond the correction budget a Reed-Solomon decoder has two ways
+             * to be wrong, and only one of them announces itself. It can
+             * declare failure -- that is the safe one. Or it can land on a
+             * DIFFERENT valid codeword, return a confident success, and hand
+             * up data that is wrong: a MISCORRECTION. The syndrome recheck
+             * inside fec_decode catches an incomplete correction, but a
+             * genuine neighbouring codeword has zero syndrome by definition
+             * and passes it.
+             *
+             * Scoring on the return value alone therefore counts silent
+             * miscorrections as successes, which flatters exactly the column
+             * this table exists to question. Part 4 already compares against
+             * the transmitted word; this now does the same, and reports
+             * miscorrections separately because they are the interesting
+             * number rather than a detail to fold into a total. */
             if (fec_decode(rx) < 0) {
                 fail_hard++;
+            } else if (memcmp(rx, cw, sizeof(cw)) != 0) {
+                fail_hard++;
+                miscorr_hard++;
             }
             if (fec_decode_erasures(rs, erased, NULL) < 0) {
                 fail_soft++;
+            } else if (memcmp(rs, cw, sizeof(cw)) != 0) {
+                fail_soft++;
+                miscorr_soft++;
             }
         }
 
-        printf("     %-8.3f %-8.1f %-9.1f %-9.1f %-9llu %llu%s\n",
+        printf("     %-8.3f %-8.1f %-8.1f %-8.1f %-10llu %-10llu %llu / %llu%s\n",
                MARGIN[m],
                (double)flags / (double)n_cw,
                (double)errs / (double)n_cw,
                (double)covered / (double)n_cw,
                (unsigned long long)fail_hard,
                (unsigned long long)fail_soft,
+               (unsigned long long)miscorr_hard,
+               (unsigned long long)miscorr_soft,
                overflow ? "   (flag budget overflowed, fell back to hard)" : "");
     }
+
+    printf("\n     The last column is the one worth staring at. A MISCORRECTION is a\n");
+    printf("     decode that returned success and produced the WRONG codeword: past\n");
+    printf("     the budget the received word can be closer to a neighbouring valid\n");
+    printf("     codeword than to the transmitted one, and a neighbouring codeword\n");
+    printf("     has zero syndrome by construction, so no self-check inside the\n");
+    printf("     decoder can catch it. It is counted as a failure above, because it\n");
+    printf("     is one -- but on a real link nothing downstream would know.\n");
+    printf("     Scoring these as successes, which this table used to do by trusting\n");
+    printf("     the return value alone, makes a decoder look better exactly where it\n");
+    printf("     is behaving worst.\n");
 
     printf("\n     Read the arithmetic, not the hope. Flagging a symbol converts an\n");
     printf("     error from costing two parity symbols to costing one, saving one --\n");

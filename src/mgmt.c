@@ -77,6 +77,42 @@ uint32_t mgmt_bus_dropped(void) { return g_dropped; }
 /* A write to REG_MGMT_DATA is a FIFO PUSH, not a store: the value is never
  * readable back. Writing into a full FIFO LOSES the byte -- which is exactly
  * why the firmware must consult REG_MGMT_STAT before every write. */
+/* REG_MGMT_STAT IS A LIVE HARDWARE STATUS, SO KEEP IT LIVE.
+ *
+ * There is one FIFO per macro, but the register that reports its free space
+ * lives inside the per-lane window, so the hardware model has to drive every
+ * instance of it. Two separate bugs came out of getting that wrong.
+ *
+ * The first was scope: this was published through whichever lane happened to
+ * be selected, so on an eight-lane macro exactly one aperture ever held a real
+ * value. The other seven read their reset value of zero, concluded the FIFO
+ * was permanently full, and deferred forever -- six lanes never emitted a
+ * single telemetry byte, and the whole backpressure mechanism looked healthy
+ * because nothing was pushing.
+ *
+ * The second only appeared once that was fixed: publishing once per block is a
+ * SNAPSHOT, and eight producers then each reserve space against the same
+ * stale number. Every lane reads "512 free", every lane pushes 32 bytes, and
+ * the FIFO is overrun by seven of them -- a check that each producer passes
+ * individually and they collectively fail. That is what a shared status
+ * register consumed by multiple producers does when it is not live, and it is
+ * the same class of error as any read-then-act race.
+ *
+ * On silicon this register is combinational off the FIFO pointers: a read
+ * returns the state at the moment of the read. This function is the model of
+ * that, called on every change, so a producer's check reflects what the
+ * producers ahead of it have already taken. */
+static void publish_free(void)
+{
+    const unsigned save = hal_current_lane();
+    const uint32_t free_now = mgmt_bus_free();
+    for (unsigned ln = 0; ln < HAL_MAX_LANES; ++ln) {
+        hal_select_lane(ln);
+        hw_reg_set(REG_MGMT_STAT, free_now);
+    }
+    hal_select_lane(save);
+}
+
 void mgmt_bus_push(uint32_t val)
 {
     if ((hal_read32(REG_MGMT_CTRL) & MGMT_TX_EN) == 0u) {
@@ -88,6 +124,7 @@ void mgmt_bus_push(uint32_t val)
     }
     g_fifo[g_head % MGMT_FIFO_BYTES] = (uint8_t)(val & 0xFFu);
     g_head++;
+    publish_free();
 }
 
 void mgmt_bus_reset(void)
@@ -118,7 +155,8 @@ void mgmt_bus_tick(void)
             g_wire_head++;
         }
     }
-    hw_reg_set(REG_MGMT_STAT, mgmt_bus_free());
+    /* Draining frees space, so republish. See publish_free(). */
+    publish_free();
 }
 
 size_t mgmt_wire_available(void) { return g_wire_head - g_wire_tail; }

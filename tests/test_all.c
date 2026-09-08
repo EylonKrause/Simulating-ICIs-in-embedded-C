@@ -194,6 +194,85 @@ static void test_adapt_closes_loop(void)
     CHECK(fw_adapt_cursor_tap() == FFE_CURSOR,
           "firmware and datapath agree on which tap is the cursor");
     CHECK(fw_adapt_converged() == 1, "convergence is detected and reported");
+
+    /* AND THE OTHER DIRECTION, WHICH IS THE ONE THAT MATTERS.
+     *
+     * The assertion above is satisfied by `return 1;`. On its own it tests
+     * that the detector can say yes, never that it can say no -- so the whole
+     * tap-movement mechanism could be deleted and the suite would stay green.
+     * That is the exact failure this project has already shipped twice, in
+     * both directions: a threshold so tight convergence was never declared,
+     * and one so loose it fired instantly on an unconverged loop. A one-sided
+     * test catches only the second.
+     *
+     * Note the gradient has to be big enough to matter. CONV_TAP_DELTA is a
+     * budget SUMMED over all 24 taps, so one tap creeping a code every sixty
+     * blocks is inside the dither tolerance and SHOULD read as settled -- the
+     * first attempt at this test used a gradient that weak, failed, and was
+     * wrong rather than the code. This drives eight taps hard enough to move
+     * about two codes per block each, which is unambiguously not dither. */
+    fw_adapt_reset();
+    fw_adapt_set_gear(4u, 0u);
+    hal_write32(REG_ADAPT_CTRL, ADAPT_FFE_EN | (4u << ADAPT_MU_SHIFT));
+
+    const int32_t BIG = 600000;
+    int refused_while_moving = 1;
+    for (unsigned iter = 0; iter < 300u; ++iter) {
+        /* Alternate the sign every block so the taps swing back and forth
+         * instead of running to their rails: this isolates "still moving"
+         * from "pinned at a limit", which is the next case below. */
+        const int32_t g = ((iter & 1u) != 0u) ? BIG : -BIG;
+        for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) {
+            hw_reg_set(REG_GRAD_ACC(i), (uint32_t)((i >= 8u) ? g : 0));
+        }
+        (void)fw_adapt_step();
+        if (iter > 4u && fw_adapt_converged() != 0) {
+            refused_while_moving = 0;
+            break;
+        }
+    }
+    CHECK(refused_while_moving,
+          "convergence is REFUSED while the taps are still moving every block");
+
+    /* Stop the gradient and require it to notice. Without this half the check
+     * above is satisfied by `return 0;` -- the same vacuity, mirrored. */
+    for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) {
+        hw_reg_set(REG_GRAD_ACC(i), 0u);
+    }
+    for (unsigned iter = 0; iter < 200u; ++iter) {
+        (void)fw_adapt_step();
+    }
+    CHECK(fw_adapt_converged() == 1,
+          "and declared once they stop -- so neither a stuck-yes nor a "
+          "stuck-no passes this pair");
+
+    /* A SATURATED TAP IS NOT A CONVERGED ONE.
+     *
+     * Drive one tap in one direction until the applied value pins at the rail.
+     * The published tap then stops changing, so the movement test alone sees a
+     * perfectly quiet loop -- while the accumulator is still demanding, every
+     * block, a filter the register is too narrow to express. This is the same
+     * trap the CDR lock detector fell into with its anti-windup clamp: a
+     * quantity held still by a limiter looks exactly like one held still by
+     * convergence. */
+    fw_adapt_reset();
+    fw_adapt_set_gear(4u, 0u);
+    hal_write32(REG_ADAPT_CTRL, ADAPT_FFE_EN | (4u << ADAPT_MU_SHIFT));
+    for (unsigned iter = 0; iter < 2000u; ++iter) {
+        for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) {
+            hw_reg_set(REG_GRAD_ACC(i), (uint32_t)((i == 9u) ? BIG : 0));
+        }
+        (void)fw_adapt_step();
+    }
+    const int32_t railed_tap = hal_read_signed(REG_FFE_TAP(9), TAP_APPLY_BITS);
+    printf("        tap[9] driven to %d (rail is %d), still being pushed\n",
+           railed_tap, TAP_APPLY_MAX);
+    CHECK(railed_tap == TAP_APPLY_MAX, "the tap really is pinned at its rail");
+    CHECK(fw_adapt_converged() == 0,
+          "a RAILED tap is not reported as converged, though it has stopped "
+          "moving -- the limiter, not the loop, is what stopped it");
+
+    fw_adapt_reset();
 }
 
 /* --------------------------------------------------- leakage bleeds to zero */
@@ -533,11 +612,19 @@ static void test_touchstone(void)
     }
     fputs("! a comment line\n", fp);
     fputs("# MHZ S MA R 50\n", fp);
-    /* A 2-port record is four complex pairs: S11 S21 S12 S22. */
-    fputs("1000  0.1 0   0.9 -10  0.9 -10  0.1 0\n", fp);
-    fputs("2000  0.2 0   0.8 -20  0.8 -20  0.2 0   ! trailing comment\n", fp);
+    /* A 2-port record is four complex pairs: S11 S21 S12 S22.
+     *
+     * S21 AND S12 ARE DELIBERATELY DIFFERENT. They used to both be 0.9, which
+     * made the whole transpose assertion below unfalsifiable: on a reciprocal
+     * fixture a row-major read returns the identical number, so the check
+     * passed whether or not the code handled the column-major wart at all. A
+     * test for an asymmetry needs an asymmetric fixture. Real passive channels
+     * ARE reciprocal, which is exactly why this bug is dangerous in the field
+     * and why the fixture must not be. */
+    fputs("1000  0.1 0   0.9 -10  0.4 -70  0.2 0\n", fp);
+    fputs("2000  0.2 0   0.8 -20  0.3 -80  0.1 0   ! trailing comment\n", fp);
     fputs("3000  0.3 0\n", fp);          /* record split across two lines */
-    fputs("      0.7 -30  0.7 -30  0.3 0\n", fp);
+    fputs("      0.7 -30  0.5 -90  0.3 0\n", fp);
     fclose(fp);
 
     touchstone_t ts;
@@ -561,12 +648,29 @@ static void test_touchstone(void)
     /* THE TWO-PORT TRANSPOSE. v1 stores a 2-port column major, so S21 is the
      * SECOND pair on the line and S12 the third. Reading it row major swaps
      * the through path with the reverse one -- nearly invisible on a
-     * reciprocal channel, which is what makes it dangerous. */
+     * reciprocal channel, which is what makes it dangerous.
+     *
+     * Both directions are read back and asserted against DIFFERENT values, so
+     * dropping the transpose swaps 0.9 and 0.4 and the test fails. The
+     * previous version of these two lines re-tested the `mag` variable
+     * computed eleven lines earlier -- a literal duplicate of an assertion
+     * already made, against a fixture where both answers were 0.9. It could
+     * not fail, while claiming to cover the one format quirk this reader
+     * exists to get right. */
     const ts_cplx s11 = ts_get(&ts, 0u, 1u, 1u);
+    const ts_cplx s12 = ts_get(&ts, 0u, 1u, 2u);
+    const ts_cplx s22 = ts_get(&ts, 0u, 2u, 2u);
+    const double m12 = sqrt(s12.re * s12.re + s12.im * s12.im);
+    const double m22 = sqrt(s22.re * s22.re + s22.im * s22.im);
     CHECK(fabs(sqrt(s11.re * s11.re + s11.im * s11.im) - 0.1) < 1e-9,
           "S11 is the first pair");
     CHECK(fabs(mag - 0.9) < 1e-9,
           "S21 is the SECOND pair: the 2-port column-major transpose is handled");
+    CHECK(fabs(m12 - 0.4) < 1e-9,
+          "S12 is the THIRD pair, and it is NOT equal to S21");
+    CHECK(fabs(m22 - 0.2) < 1e-9, "S22 is the fourth pair");
+    CHECK(fabs(mag - m12) > 0.1,
+          "the fixture is non-reciprocal, so a row-major read would fail these");
 
     ts_free(&ts);
     remove(path);
@@ -996,9 +1100,51 @@ static void test_pcs_loopback(void)
         }
         pcs_rx_push(&rx, s, 0);
     }
-    CHECK(rx.pre_bit_errors > 0u, "pre-FEC errors are counted");
+    /* Exactly t field elements were corrupted, one PAM4 symbol in each, and a
+     * PAM4 symbol carries two Gray-coded bits of which this flips one. So the
+     * pre-FEC bit count is known exactly, not merely "more than zero" -- and
+     * asserting the exact number is what makes the counter's SCALE testable
+     * rather than just its sign. */
+    CHECK(rx.pre_bit_errors == RS_T,
+          "pre-FEC errors are counted, and exactly the number injected");
     CHECK(rx.corrected_symbols == RS_T, "the decoder corrects exactly t symbols");
     CHECK(rx.post_bit_errors == 0u, "post-FEC the payload is clean");
+
+    /* PAST THE BUDGET: THE TWO COUNTERS THAT NOTHING ELSE EVER DRIVES.
+     *
+     * post_bit_errors and uncorrectable are the numbers link_sim prints as the
+     * project's headline post-FEC result, and its CI exit code is built on
+     * `uncorrectable == 0`. Every other case in this suite is a CLEAN one, so
+     * both counters would read zero if they were hard-wired to zero, and the
+     * gate that depends on them would pass on a receiver that had stopped
+     * counting. This project's own bug table calls a metric that cannot be
+     * non-zero the worst defect it shipped; these two were exactly that.
+     *
+     * t+1 = 16 corrupted field elements is one past what RS(544,514) can
+     * correct, so the decoder must DECLARE failure -- not silently miscorrect
+     * -- and the residual errors must survive into the payload. */
+    pcs_tx_init(&tx, 0x77E51F03u);
+    pcs_rx_init(&rx, 0x77E51F03u);
+    for (unsigned i = 0; i < lead; ++i) {
+        pcs_rx_push(&rx, pcs_tx_next(&tx), 0);
+    }
+    for (unsigned i = 0; i < RS_PAM4_PER_CW; ++i) {
+        unsigned s = pcs_tx_next(&tx);
+        if (i < (RS_T + 1u) * RS_PAM4_PER_GF && (i % RS_PAM4_PER_GF) == 0u) {
+            s = (s + 1u) & 3u;
+        }
+        pcs_rx_push(&rx, s, 0);
+    }
+    CHECK(rx.pre_bit_errors == RS_T + 1u,
+          "t+1 injected errors are all counted pre-FEC");
+    CHECK(rx.uncorrectable == 1u,
+          "one past the budget is DECLARED uncorrectable, not miscorrected");
+    CHECK(rx.post_bit_errors > 0u,
+          "and the errors survive into the payload -- so post_bit_errors is "
+          "a counter that can be non-zero, which is the only reason to trust "
+          "it when it reads zero");
+    CHECK(rx.corrected_symbols == 0u,
+          "and a failed decode adds nothing to the corrected-symbol count");
 }
 
 
