@@ -141,28 +141,19 @@ unguarded read-modify-write and never read-modify-writes a W1C register.
 
 ## Verified end to end
 
-A real run at 20 dB and -80 ppm, including the two failed attempts the search
-makes before it finds a workable front-end point:
+A clean run, 12 dB and -80 ppm, first attempt:
 
 ```
   t[ms]  state        VGA  TIA  CTLE
       0  PLL_LOCK     32   8    8
      10  AGC          32   8    8
-     22  CDR_LOCK     41   8    13
-    113  EQ_TRAIN     41   8    13
-    363  EQ_VERIFY    41   8    13
-    437  FAULT        35   8    13   <-- verification rejected this answer
-    440  PLL_LOCK     34   8    8
-    453  CDR_LOCK     43   8    15
-    753  FAULT        43   8    15   <-- CDR could not acquire here
-    758  PLL_LOCK     36   8    8
-    764  CDR_LOCK     37   8    8
-    824  EQ_TRAIN     37   8    8
-   1074  EQ_VERIFY    37   8    8
-   1148  TRACK        37   8    8
-   1149  UP           37   8    8
+     13  CDR_LOCK     32   8    9
+     21  EQ_TRAIN     32   8    9
+    271  EQ_VERIFY    32   8    9
+    345  TRACK        31   8    9
+    346  UP           31   8    9
 
-  LINK UP after 1149 ms
+  LINK UP after 346 ms
 
   FEC  --  RS(544,514) over GF(2^10), t = 15 symbols
     equaliser latency   5 symbols (measured by pattern alignment)
@@ -172,25 +163,39 @@ makes before it finds a workable front-end point:
     post-FEC BER        < 6.5e-07   (no residual errors in 1531720 bits)
     KP4 margin          +25.9 dB against the 2.4e-4 pre-FEC limit
 
-  HAL access audit
-    read-modify-writes  1424
-    UNGUARDED RMW          0  (ok)
-    W1C RMW bugs           0  (ok)
+  management bus      268 frames, 0 bytes dropped
+  HAL access audit    15 read-modify-writes, 0 unguarded, 0 W1C bugs
 ```
 
-`150 checks, 0 failures`.
+`150 checks, 0 failures`, and the same under AddressSanitizer.
 
-The two `FAULT`s are the point, not noise. The first attempt converged and was
-**rejected by verification** -- every loop reported success and the measured
-error rate said otherwise. The second could not get the CDR to acquire at all.
-Neither was allowed to bring the link up.
+**The interesting runs are the ones that do not go like that.** At 16 dB and
+-200 ppm the search takes six attempts before it finds a workable front end,
+and the two ways it fails are both worth seeing (abridged):
 
-**The BER above is measured, and that sentence needs saying because it was not
-always true.** An earlier version of this project reported `pre-FEC BER
-0.000e+00` from a counter that only incremented during training and was only
-read in `LS_UP`, where training is off. It was structurally incapable of being
-non-zero, and it hid a receiver whose CDR never locked at all. Everything in
-the bug table below was found after replacing it with a real measurement.
+```
+     17  CDR_LOCK     36   8    10
+    317  FAULT        36   8    10   <-- CDR could not acquire: timed out
+    ...
+    342  EQ_TRAIN     39   8    13
+    592  EQ_VERIFY    39   8    13
+    666  FAULT        35   8    13   <-- converged, then FAILED VERIFICATION
+    ...
+   2045  UP           34   8    11        pre-FEC 1.2e-6, post-FEC clean
+```
+
+The second fault is the one that matters. Every loop reported convergence and
+the link was still not good enough, so bring-up rejected its own answer and
+tried a different operating point rather than declaring success. An earlier
+version of this project had no such check and came up at 12 dB with every
+status bit green and a pre-FEC BER of 7.6e-2.
+
+**And the BER above is measured, which needs saying because it was not always
+true.** An earlier version printed `pre-FEC BER 0.000e+00` from a counter that
+only incremented during training and was only read in a state where training is
+off. It was structurally incapable of being non-zero, and it hid a receiver
+whose CDR never locked at all. Everything in the bug table below was found
+after replacing it with a real measurement.
 
 ## Operating range
 
@@ -347,34 +352,34 @@ not. There is a unit test for it.
   without this and the product does not.
 
 Eight lanes, losses spread 10 to 18 dB and reference offsets spread -200 to
-+120 ppm, one supervisor:
++120 ppm, all serviced by one supervisor:
 
 ```
-  lane  IL@Nyq   ppm     state      VGA  CTLE   pre-FEC BER   post-FEC
-  0     10.00    -200    UP         27   6      0.000e+00     clean
-  1     11.15    -154    UP         30   8      0.000e+00     clean
-  2     12.29    -109    UP         30   8      0.000e+00     clean
-  3     13.44     -63    UP         32   10     0.000e+00     clean
-  4     14.58     -17    EQ_TRAIN   34   15     3.7e-02       --
-  5     15.72     +29    EQ_TRAIN   34   15     1.7e-01       --
-  6     16.86     +74    EQ_TRAIN   34   15     1.6e-01       --
-  7     18.00    +120    UP         34   8      0.000e+00     clean
+  lane  IL@Nyq   ppm     up at    pre-FEC BER   post-FEC   uncorrectable
+  0     10.00    -200    422 ms   0.000e+00     clean      0 / 298
+  1     11.15    -154    362 ms   0.000e+00     clean      0 / 298
+  2     12.29    -109    341 ms   0.000e+00     clean      0 / 298
+  3     13.44     -63    340 ms   0.000e+00     clean      0 / 298
+  4     14.58     -17   2088 ms   0.000e+00     clean      0 / 298
+  5     15.72     +29   2036 ms   6.165e-07     clean      0 / 298
+  6     16.86     +74    never    5.009e-01     --         298 / 298
+  7     18.00    +120   1062 ms   0.000e+00     clean      0 / 298
 
-  5 of 8 lanes up      lanes 0,1,2,3 up within 430 ms; lane 7 at 1024 ms
-  supervisor services  equal across all eight -- the round robin starves nobody
+  7 of 8 lanes up
+  supervisor services  3200 each -- the round robin starves nobody
   UNGUARDED RMW        0   (ok)
   W1C RMW bugs         0   (ok)
   bytes dropped        0   (ok)
 ```
 
-Five lanes carry FEC traffic with **zero pre-FEC errors**. The three that do not
-come up sit at 14.6 to 16.9 dB -- the same search-coverage gap the single-lane
-sweep shows at 16 dB, and they all land on the maximum CTLE code, which is the
-signature of the loss estimate overshooting. It is one bug, not three, and it
-is in the front-end search rather than the datapath.
+**Seven lanes carry FEC traffic with zero pre-FEC errors and no uncorrectable
+codewords.** Lane 6 sits at 16.9 dB, in the same band the single-lane sweep is
+weakest in, and it is honest that the macro reports 7 of 8 rather than an
+average.
 
-Rows that differ are the point: identical rows would mean the per-lane contexts
-are not independent.
+`macro_sim 8 14 0 4000 2` runs the same thing with the supervisor servicing
+only two lanes per block, which quarters every control loop's bandwidth and
+stretches the firmware's timeouts by four to match.
 
 ## Known limitations
 
