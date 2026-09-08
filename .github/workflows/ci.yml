@@ -27,9 +27,10 @@ jobs:
         run: ${{ matrix.cc }} --version
 
       # The central claim of this project is that firmware reaches the datapath
-      # ONLY through the register interface. Two violations had crept in and
-      # both wrote bits that nothing read, so nothing failed. Assert the claim
-      # rather than repeating it in a header.
+      # ONLY through the register interface. Three violations had crept in, and
+      # two of them wrote bits that nothing read -- so nothing failed and
+      # nothing pointed at them. Assert the claim rather than repeating it in a
+      # header, where it can drift away from the code underneath it.
       - name: Firmware never calls the hardware-side backend
         run: |
           if grep -nE 'hw_reg_set|hw_reg_get|hw_status_set|hw_lane_|hw_macro_|hal_reset_all' src/fw_*.c; then
@@ -54,6 +55,29 @@ jobs:
 
       - name: CDR loop check
         run: ./out/cdr_probe 20 120 12 0 0 36
+
+      # The headline result of the project is that a lane BRINGS ITSELF UP and
+      # delivers a clean payload. Everything above this line can pass while
+      # that is false -- which it was, for most of this project's history, in a
+      # way no unit test noticed. These two steps run the real thing.
+      #
+      # Both binaries exit non-zero unless the link is up, no codeword was
+      # uncorrectable, and the bus audit is clean; macro_sim additionally
+      # requires the supervisor's round robin to be fair across lanes. The
+      # criteria are printed, so a CI failure says which one broke.
+      - name: A lane brings itself up and the payload decodes
+        run: ./out/link_sim 12 -80
+
+      - name: Four lanes share one supervisor and all come up
+        run: ./out/macro_sim 4 14 0 1500
+
+      # An .s4p is external input. This is the published synthesised file, read
+      # end to end: parse, interpolate, build an impulse response.
+      - name: Measured-S-parameter path
+        run: ./out/ch_probe data/pkg_backplane.s4p
+
+      - name: FEC codec self-test
+        run: ./out/fec_probe
 
       - name: build.sh works too
         run: |

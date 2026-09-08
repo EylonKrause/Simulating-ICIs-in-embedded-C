@@ -243,7 +243,42 @@ int main(int argc, char **argv)
     printf("    bytes dropped       %u   %s\n", mgmt_bus_dropped(),
            mgmt_bus_dropped() ? "<-- BUG: pushed into a full FIFO" : "(ok)");
 
+    /* ---- the exit code ---------------------------------------------------
+     *
+     * Same reasoning as link_sim: CI runs this, so the code has to assert the
+     * multi-lane claim rather than a status bit. Two things are specific to a
+     * macro.
+     *
+     * The round robin has to be FAIR. A supervisor that quietly stopped
+     * servicing one lane would still report the other seven up, and the lane
+     * it starved would fail slowly and for a reason that looks like the
+     * channel. Services must be within one of each other -- one, not a
+     * percentage, because the scheduler is exact and any drift is a bug.
+     *
+     * The macro's number is its WORST lane. Averaging eight lanes is how a
+     * part passes on the bench and fails in the rack. */
+    unsigned lo = 0xFFFFFFFFu, hi = 0u, worst_uncorr = 0u;
+    for (unsigned i = 0; i < M->n_lanes; ++i) {
+        const unsigned long long sv = (unsigned long long)M->services[i];
+        if (sv < lo) { lo = (unsigned)sv; }
+        if (sv > hi) { hi = (unsigned)sv; }
+        if (M->lane[i].pcs_rx.uncorrectable != 0u) { ++worst_uncorr; }
+    }
+    const int all_up = (n_up == lanes);
+    const int fair   = ((hi - lo) <= 1u);
+    const int payload = (worst_uncorr == 0u);
+    const int clean  = (hs->unguarded_rmw == 0u) && (hs->w1c_rmw_bugs == 0u) &&
+                       (mgmt_bus_dropped() == 0u);
+
+    printf("\n  PASS CRITERIA\n");
+    printf("    all %u lanes up      %s\n", lanes, all_up  ? "yes" : "NO");
+    printf("    no uncorrectable    %s\n", payload ? "yes" : "NO");
+    printf("    round robin fair    %s   (spread %u)\n", fair ? "yes" : "NO", hi - lo);
+    printf("    bus hygiene clean   %s\n", clean   ? "yes" : "NO");
+    printf("  ==> %s\n",
+           (all_up && payload && fair && clean) ? "PASS" : "FAIL");
+
     hw_macro_free(M);
     free(M);
-    return (n_up == lanes) ? 0 : 1;
+    return (all_up && payload && fair && clean) ? 0 : 1;
 }

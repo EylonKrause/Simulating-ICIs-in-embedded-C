@@ -35,9 +35,18 @@ vendor's silicon and contains nothing proprietary.
 
 **No `fw_*.c` file contains a single floating-point operation, and none of them
 calls the hardware-side backend.** Both claims are enforced by a grep step in
-CI rather than asserted in a comment -- they had each been quietly violated
-once, and in both cases the violation wrote a register that nothing read, so
-nothing failed.
+CI rather than asserted in a comment, and the second one needed it: the seam
+was crossed three separate times before the grep existed. Twice the offending
+write went to a register that nothing read, so nothing ever failed and nothing
+ever pointed at it. A claim that lives only in a header is a claim that drifts.
+
+**CI also runs the link itself, not just the unit tests.** `link_sim` and
+`macro_sim` exit non-zero unless the lane brings itself up, every codeword
+decodes, and the bus audit is clean -- and `macro_sim` additionally fails if
+the supervisor's round robin drifts by more than one service between lanes.
+This matters because for most of this project's history the unit tests were
+green while the receiver did not work: 158 checks of loops and registers say
+nothing about whether the thing at the end of them recovers data.
 
 ## Architecture
 

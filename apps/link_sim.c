@@ -266,6 +266,36 @@ int main(int argc, char **argv)
     }
     printf("\n");
 
+    /* ---- the exit code, and what it is allowed to mean -----------------
+     *
+     * CI runs this binary, so the exit code is a regression gate and has to
+     * assert the thing the project actually claims. "The state machine reached
+     * UP" is not that claim -- an earlier version of this receiver reached UP
+     * with every status bit green and a pre-FEC BER of 7.6e-2, which is the
+     * whole reason EQ_VERIFY exists.
+     *
+     * So the gate is the product-level criterion, in three parts:
+     *
+     *   link up            the control plane finished bring-up
+     *   no uncorrectable   every codeword the decoder saw came out clean
+     *   bus hygiene        no unguarded read-modify-write, no W1C RMW, no
+     *                      byte pushed into a full FIFO
+     *
+     * Deliberately NOT part of it: zero PRE-FEC errors. FEC exists precisely
+     * so a link with pre-FEC errors still delivers a clean payload, and
+     * gating on a pre-FEC zero would make CI fail on operating points that
+     * are working exactly as designed. The payload is the contract. */
+    const int up      = fw_is_up(&fw);
+    const int decoded = (pcs->codewords > 0u) && (pcs->uncorrectable == 0u);
+    const int clean   = (hs->unguarded_rmw == 0u) && (hs->w1c_rmw_bugs == 0u) &&
+                        (mgmt_bus_dropped() == 0u);
+
+    printf("\n  PASS CRITERIA\n");
+    printf("    link up             %s\n", up      ? "yes" : "NO");
+    printf("    no uncorrectable    %s\n", decoded ? "yes" : "NO");
+    printf("    bus hygiene clean   %s\n", clean   ? "yes" : "NO");
+    printf("  ==> %s\n", (up && decoded && clean) ? "PASS" : "FAIL");
+
     hw_lane_free(&hw);
-    return fw_is_up(&fw) ? 0 : 1;
+    return (up && decoded && clean) ? 0 : 1;
 }
