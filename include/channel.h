@@ -100,8 +100,23 @@ void channel_free(channel_t *ch);
 double channel_il_db(const channel_t *ch, double f_ghz);
 
 /* Convolve an oversampled waveform with the channel. `y` must hold `n`
- * samples; the tail beyond `n` is discarded (streaming semantics). */
-void channel_apply(const channel_t *ch, const real_t *x, real_t *y, size_t n);
+ * samples.
+ *
+ * `ch` IS NOT CONST, and the missing const is the interface, not an oversight.
+ * This is the STREAMING path: the convolution tail that runs past the end of
+ * one block is held inside the channel and added to the front of the next, so
+ * consecutive calls are a continuous filter rather than a sequence of
+ * independent ones. The channel carries memory, and the signature says so.
+ *
+ * It used to say `const` and cast that away internally, which is worse than
+ * useless -- it advertises a guarantee the code then breaks, and it invites a
+ * caller to share one channel between two streams, which silently splices
+ * their tails together. Calling it on a genuinely const object was also
+ * undefined behaviour.
+ *
+ * For a single-shot measurement from a quiescent channel, use the direct form
+ * below, which really is stateless. */
+void channel_apply(channel_t *ch, const real_t *x, real_t *y, size_t n);
 
 /* The textbook form, O(taps) per sample. Kept because it IS the definition:
  * the fast path is verified against it in the unit tests rather than against
@@ -111,8 +126,11 @@ void channel_apply_direct(const channel_t *ch, const real_t *x, real_t *y,
 
 /* Same, through the CROSSTALK response, accumulating into `y` rather than
  * overwriting it -- an aggressor adds to whatever the victim already has.
- * A no-op if the channel carries no crosstalk data. */
-void channel_apply_xtalk(const channel_t *ch, const real_t *x, real_t *y,
+ * A no-op if the channel carries no crosstalk data.
+ *
+ * Also stateful, and for the same reason: it keeps its own overlap-add tail,
+ * separate from the through path's. */
+void channel_apply_xtalk(channel_t *ch, const real_t *x, real_t *y,
                          size_t n, double scale);
 
 /* Pulse response: the channel's response to a single symbol held for one UI.

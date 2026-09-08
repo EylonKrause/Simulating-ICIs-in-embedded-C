@@ -529,28 +529,26 @@ void channel_apply_direct(const channel_t *ch, const real_t *x, real_t *y,
     }
 }
 
-void channel_apply(const channel_t *ch, const real_t *x, real_t *y, size_t n)
+void channel_apply(channel_t *ch, const real_t *x, real_t *y, size_t n)
 {
-    channel_t *m = (channel_t *)ch;      /* the cache is the only mutation */
-    if (ola_prepare(ch, ch->h, ch->n, &m->fft_h, &m->ola_tail_h) == 0) {
-        ola_convolve(m->fft_h, m->ola_tail_h, x, y, n, 0, 1.0);
+    if (ola_prepare(ch, ch->h, ch->n, &ch->fft_h, &ch->ola_tail_h) == 0) {
+        ola_convolve(ch->fft_h, ch->ola_tail_h, x, y, n, 0, 1.0);
         return;
     }
     channel_apply_direct(ch, x, y, n);
 }
 
-void channel_apply_xtalk(const channel_t *ch, const real_t *x, real_t *y,
+void channel_apply_xtalk(channel_t *ch, const real_t *x, real_t *y,
                          size_t n, double scale)
 {
     if (ch->hx == NULL || ch->nx == 0u) {
         return;
     }
-    channel_t *m = (channel_t *)ch;
-    if (ola_prepare(ch, ch->hx, ch->nx, &m->fft_hx, &m->ola_tail_hx) == 0) {
+    if (ola_prepare(ch, ch->hx, ch->nx, &ch->fft_hx, &ch->ola_tail_hx) == 0) {
         /* ACCUMULATE. An aggressor adds to what the victim already carries;
          * it does not replace it. Overwriting here would silently model a
          * switch rather than a coupling. */
-        ola_convolve(m->fft_hx, m->ola_tail_hx, x, y, n, 1, scale);
+        ola_convolve(ch->fft_hx, ch->ola_tail_hx, x, y, n, 1, scale);
         return;
     }
     for (size_t i = 0; i < n; ++i) {
