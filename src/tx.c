@@ -59,6 +59,19 @@ unsigned pam4_slice(real_t y)
     return 3u;
 }
 
+unsigned pam4_sym_from_gray(unsigned gray)
+{
+    /* PAM4_GRAY is {0,1,3,2}, which happens to be its own inverse, but write
+     * the search out rather than relying on that: the table is the spec and a
+     * coincidence is not a contract. */
+    for (unsigned i = 0; i < 4u; ++i) {
+        if (PAM4_GRAY[i] == (gray & 3u)) {
+            return i;
+        }
+    }
+    return 0u;
+}
+
 unsigned pam4_bit_errors(unsigned a, unsigned b)
 {
     const unsigned ga = PAM4_GRAY[a & 3u];
@@ -117,6 +130,11 @@ real_t tx_step(tx_t *tx, unsigned *sym_out)
         *sym_out = sym;
     }
     return tx_ffe_step(&tx->ffe, pam4_level(sym));
+}
+
+real_t tx_step_sym(tx_t *tx, unsigned sym)
+{
+    return tx_ffe_step(&tx->ffe, pam4_level(sym & 3u));
 }
 
 void tx_upsample(real_t level, real_t *dst)

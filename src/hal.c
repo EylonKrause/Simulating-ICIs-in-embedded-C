@@ -21,8 +21,9 @@
 
 #include <string.h>
 
-#define REG_SPACE_BYTES   0x100u
-#define REG_COUNT         (REG_SPACE_BYTES / 4u)
+#define REG_SPACE_BYTES   LANE_STRIDE
+#define REG_PER_LANE      (REG_SPACE_BYTES / 4u)
+#define REG_COUNT         (REG_PER_LANE * HAL_MAX_LANES)
 
 static volatile uint32_t REG_FILE[REG_COUNT];
 static uint32_t          g_w1c_map[REG_COUNT];   /* which bits are W1C       */
@@ -41,29 +42,54 @@ static uint32_t   g_isr_runs;
 static uint32_t   g_isr_deferred;
 static unsigned   g_in_isr;
 
+/* The currently selected lane aperture. Every hal access below is relative to
+ * it, so per-lane firmware needs no address arithmetic of its own. */
+static unsigned g_lane;
+
+void hal_select_lane(unsigned lane)
+{
+    g_lane = (lane < HAL_MAX_LANES) ? lane : 0u;
+}
+
+unsigned hal_current_lane(void) { return g_lane; }
+
 static size_t idx_of(uint32_t off)
 {
-    return (size_t)((off & (REG_SPACE_BYTES - 1u)) >> 2);
+    /* Mask to the aperture, then add the selected lane's base. An offset that
+     * already carries a LANE_BASE(n) is therefore harmless -- it folds back to
+     * the same register within the selected lane rather than reaching into a
+     * neighbour by accident. */
+    return (size_t)(g_lane) * REG_PER_LANE +
+           (size_t)((off & (REG_SPACE_BYTES - 1u)) >> 2);
 }
 
 void hal_reset_all(void)
 {
+    const unsigned save = g_lane;
     for (size_t i = 0; i < REG_COUNT; ++i) {
         REG_FILE[i] = 0u;
         g_w1c_map[i] = 0u;
     }
-    g_w1c_map[idx_of(REG_STATUS)]   = STATUS_W1C_MASK;
-    g_w1c_map[idx_of(REG_ERR_CNT)]  = 0xFFFFFFFFu;
-    g_w1c_map[idx_of(REG_SYM_CNT)]  = 0xFFFFFFFFu;
-    g_w1c_map[idx_of(REG_AMP_ACC)]  = 0xFFFFFFFFu;
-    g_w1c_map[idx_of(REG_EYE_ERR)]  = 0xFFFFFFFFu;
-    for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) {
-        g_w1c_map[idx_of(REG_GRAD_ACC(i))] = 0xFFFFFFFFu;
+    for (unsigned ln = 0; ln < HAL_MAX_LANES; ++ln) {
+        g_lane = ln;
+        g_w1c_map[idx_of(REG_STATUS)]   = STATUS_W1C_MASK;
+        g_w1c_map[idx_of(REG_ERR_CNT)]  = 0xFFFFFFFFu;
+        g_w1c_map[idx_of(REG_SYM_CNT)]  = 0xFFFFFFFFu;
+        g_w1c_map[idx_of(REG_AMP_ACC)]  = 0xFFFFFFFFu;
+        g_w1c_map[idx_of(REG_EYE_ERR)]  = 0xFFFFFFFFu;
+        for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) {
+            g_w1c_map[idx_of(REG_GRAD_ACC(i))] = 0xFFFFFFFFu;
+        }
+        for (unsigned i = 0; i < NUM_DFE_TAPS; ++i) {
+            g_w1c_map[idx_of(REG_DFE_GRAD(i))] = 0xFFFFFFFFu;
+        }
+        /* Lane id carries the lane NUMBER in the low bits, so firmware reading
+         * through the window can always tell which aperture it is looking at.
+         * On silicon this is hard-wired per instance, and it is the first thing
+         * to read when a driver is not sure it is talking to what it thinks. */
+        REG_FILE[idx_of(REG_LANE_ID)] = 0x00020200u | ln;  /* rev 2 */
     }
-    for (unsigned i = 0; i < NUM_DFE_TAPS; ++i) {
-        g_w1c_map[idx_of(REG_DFE_GRAD(i))] = 0xFFFFFFFFu;
-    }
-    REG_FILE[idx_of(REG_LANE_ID)] = 0x00010200u;   /* id 0x0200, rev 1 */
+    g_lane = save;
     g_crit_depth = 0u;
     g_isr_pending = 0u;
     /* NOTE: the write hook and any attached ISR are PLATFORM WIRING, not
@@ -204,7 +230,14 @@ static void hal_maybe_preempt(void)
     }
     g_in_isr = 1u;
     g_isr_runs++;
+    /* SAVE AND RESTORE THE LANE WINDOW around the handler. The window is
+     * shared mutable state: a handler that selects another lane and returns
+     * would leave the interrupted code writing a neighbour's registers while
+     * believing it is still on its own. Hardware saves the program counter for
+     * you; it does not save your peripheral paging. */
+    const unsigned isr_lane = g_lane;
     g_isr(g_isr_ctx);
+    g_lane = isr_lane;
     g_in_isr = 0u;
 }
 
@@ -223,7 +256,9 @@ void hal_critical_exit(void)
         g_isr_pending--;
         g_in_isr = 1u;
         g_isr_runs++;
+        const unsigned isr_lane = g_lane;
         g_isr(g_isr_ctx);
+        g_lane = isr_lane;
         g_in_isr = 0u;
     }
 }

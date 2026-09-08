@@ -4,3 +4,6 @@
 *.bat  text eol=crlf
 *.sh   text eol=lf
 *.pgm  binary
+# Touchstone files are plain ASCII and should stay LF like any other source.
+*.s2p  text eol=lf
+*.s4p  text eol=lf

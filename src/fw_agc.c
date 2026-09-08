@@ -1,8 +1,6 @@
 /* ===========================================================================
  *  fw_agc.c -- automatic gain control over VGA and TIA.
  *
- *  JD: "...gain control (VGA/TIA)."
- *
  *  Integer only. Reads the hardware's |y| accumulator, compares it to a target,
  *  and walks the VGA code. When the VGA runs out of range it hands off to the
  *  TIA -- and that handoff is the interesting part, because raising TIA gain
@@ -37,39 +35,58 @@
  * the channel. So bring-up starts at the nominal target and, if the CDR
  * fails to acquire, retries at a different one. Real link training does
  * exactly this -- it searches, it does not assume. */
-static int32_t  g_target = AGC_TARGET_Q12;
-static int32_t  g_vga_bias;
-static unsigned g_settled;
-static int32_t  g_mean_filt;   /* IIR-filtered amplitude, Q4.12 */
+/* Per-lane, for the same reason as fw_adapt.c: one control processor, eight
+ * lanes, and eight independent amplitudes to servo. The IIR state in
+ * particular must not be shared -- a single filter fed alternately from eight
+ * lanes converges to their average and settles on none of them. */
+typedef struct {
+    int32_t  target;
+    int32_t  vga_bias;
+    unsigned settled;
+    int32_t  mean_filt;        /* IIR-filtered amplitude, Q4.12 */
+} agc_ctx_t;
+
+static agc_ctx_t g_agc[HAL_MAX_LANES];
+static unsigned  g_ln;
+
+void fw_agc_select_lane(unsigned lane)
+{
+    g_ln = (lane < HAL_MAX_LANES) ? lane : 0u;
+}
+
+static agc_ctx_t *ctx(void) { return &g_agc[g_ln]; }
 
 void fw_agc_set_target(unsigned attempt)
 {
     /* Walk the target across attempts: nominal, then progressively higher,
      * covering the amplitude range over which the CDR can acquire. */
     static const int32_t LADDER[] = { 2731, 3100, 2400, 3400, 2100 };
-    g_target = LADDER[attempt % (sizeof(LADDER) / sizeof(LADDER[0]))];
+    ctx()->target = LADDER[attempt % (sizeof(LADDER) / sizeof(LADDER[0]))];
     /* Also bias the VGA directly. The AGC converges to an AMPLITUDE, but the
      * CDR acquires over a range of VGA CODE, and at a given channel loss the
      * two need not coincide. Walking the code offset explores that gap. */
-    g_vga_bias = (int32_t)(attempt % 6u) * 2;
+    ctx()->vga_bias = (int32_t)(attempt % 6u) * 2;
 }
 
-int32_t fw_agc_target(void) { return g_target; }
+int32_t fw_agc_target(void) { return ctx()->target; }
 
 void fw_agc_reset(void)
 {
-    g_settled   = 0u;
-    g_mean_filt = 0;
+    ctx()->settled   = 0u;
+    ctx()->mean_filt = 0;
+    if (ctx()->target == 0) {
+        ctx()->target = AGC_TARGET_Q12;   /* first touch of this lane */
+    }
     hal_critical_enter();
     hal_field_set(REG_AFE_VGA, VGA_GAIN_MASK, VGA_GAIN_SHIFT,
-                  (uint32_t)sat_to((int32_t)(VGA_GAIN_CODES / 2u) + g_vga_bias, 0, (int32_t)VGA_GAIN_CODES - 1));
+                  (uint32_t)sat_to((int32_t)(VGA_GAIN_CODES / 2u) + ctx()->vga_bias, 0, (int32_t)VGA_GAIN_CODES - 1));
     hal_field_set(REG_AFE_TIA, TIA_GAIN_MASK, TIA_GAIN_SHIFT, 8u);
     hal_critical_exit();
 }
 
 int fw_agc_converged(void)
 {
-    return (g_settled >= AGC_SETTLE_BLOCKS) ? 1 : 0;
+    return (ctx()->settled >= AGC_SETTLE_BLOCKS) ? 1 : 0;
 }
 
 int fw_agc_step(void)
@@ -90,21 +107,21 @@ int fw_agc_step(void)
      * declare convergence. Measured before this filter existed: the loop hunted
      * between VGA 27 and 32 for the full timeout and the link never came up.
      * A single-pole IIR costs one shift and one add. */
-    if (g_mean_filt == 0) {
-        g_mean_filt = mean;                    /* prime, do not ramp from zero */
+    if (ctx()->mean_filt == 0) {
+        ctx()->mean_filt = mean;                    /* prime, do not ramp from zero */
     } else {
-        g_mean_filt += (mean - g_mean_filt) >> 2;   /* alpha = 1/4 */
+        ctx()->mean_filt += (mean - ctx()->mean_filt) >> 2;   /* alpha = 1/4 */
     }
 
-    const int32_t err = g_target - g_mean_filt;
+    const int32_t err = ctx()->target - ctx()->mean_filt;
 
     if (err > -AGC_DEADBAND_Q12 && err < AGC_DEADBAND_Q12) {
-        if (g_settled < AGC_SETTLE_BLOCKS) {
-            g_settled++;
+        if (ctx()->settled < AGC_SETTLE_BLOCKS) {
+            ctx()->settled++;
         }
         return fw_agc_converged();
     }
-    g_settled = 0u;
+    ctx()->settled = 0u;
 
     /* Proportional step with a slew limit. The limit matters: an unbounded
      * proportional jump would overshoot, the next block would overshoot back,

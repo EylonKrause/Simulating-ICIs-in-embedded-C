@@ -1,5 +1,5 @@
 # ============================================================================
-#  Makefile ??? Linux and macOS (gcc or clang). Windows users: use build.bat.
+#  Makefile -- Linux and macOS (gcc or clang). Windows users: use build.bat.
 #
 #  There are NO external dependencies. Only the C standard library, plus -lm
 #  for the maths functions on Linux (a no-op on macOS, where libm is folded

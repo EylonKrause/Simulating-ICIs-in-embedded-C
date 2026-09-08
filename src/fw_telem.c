@@ -1,8 +1,6 @@
 /* ===========================================================================
  *  fw_telem.c -- telemetry producer. Firmware side of the management bus.
  *
- *  JD: "...data path control, management, and telemetry."
- *
  *  This is what "telemetry" means once you are on silicon and cannot write a
  *  file. It is a paced, framed, checksummed byte stream over an interface
  *  200,000x slower than the data path, and every design decision follows from

@@ -1,8 +1,6 @@
 /* ===========================================================================
  *  afe.h -- analogue front end: photodiode + TIA, VGA, CTLE.
  *
- *  JD: "...gain control (VGA/TIA)."
- *
  *  TIA is the tell that this is an OPTICAL front end. A transimpedance
  *  amplifier converts photodiode CURRENT to voltage; a copper link has no TIA.
  *  Both paths are modelled here and selected by afe_mode_t.
@@ -71,6 +69,15 @@ double vga_gain_db(const vga_t *v);
  * ISI while the signal is still analogue, so the converter needs fewer bits.
  * An FFE placed after a saturated or coarsely-quantised ADC cannot recover
  * what the ADC threw away. */
+/* Peaking per code; sixteen codes span 0 to 12 dB of boost.
+ *
+ * Widening this to 1.2 dB/code was tried, on the theory that 12 dB of analogue
+ * peaking is what limits the link above 24 dB of channel. It made every
+ * operating point WORSE -- 16 through 28 dB all degraded to about 4e-4 from
+ * 1e-5 or better. The peaking a given code delivers is not the only thing that
+ * changes with the step size: the zero and pole move with it, so the SHAPE of
+ * the boost changes too, and a shape matched to the channel matters more than
+ * the number of decibels. Worth remembering before reaching for more range. */
 #define CTLE_DB_PER_CODE 0.8
 
 typedef struct { unsigned code; double peak_db; biquad1_t sec; } ctle_t;

@@ -41,11 +41,19 @@ typedef struct {
     double   a_prev;
     double   integ_slow;   /* slow average of integ, for stability test  */
     double   amp_slow;     /* slow average of |y|, normalises TED gain   */
+    double   slew_slow;    /* signed EMA of realised phase movement      */
+    double   phase_prev;
+    double   h1_target;    /* postcursor the detector aims to leave      */
     uint32_t wraps;        /* phase wraps seen                           */
     uint32_t since_wrap;
 } cdr_t;
 
 void cdr_init(cdr_t *c, double kp, double ki);
+
+/* Postcursor the detector aims to leave for the DFE, as a fraction of the
+ * cursor. Zero is textbook Mueller-Muller, which has no zero crossing on a
+ * strongly asymmetric channel -- see the derivation in cdr.c. */
+void cdr_set_h1_target(cdr_t *c, double t);
 
 /* Sample the oversampled waveform for symbol n at the current phase, using
  * linear interpolation between adjacent samples -- the model of a phase

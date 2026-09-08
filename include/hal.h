@@ -1,15 +1,11 @@
 /* ===========================================================================
  *  hal.h -- Hardware Abstraction Layer for one SerDes lane.
  *
- *  JD: "Develop low-level drivers and Hardware Abstraction Layers (HAL) to
- *       interface with custom digital signal processing (DSP) hardware blocks
- *       and registers."
- *
  *  THIS IS THE ONLY SEAM between firmware and hardware. Every fw_*.c file
  *  reaches the datapath through these calls and through nothing else. That is
  *  not tidiness -- it is what makes the firmware testable with no silicon:
  *  swap the backing store for a behavioural model and the adaptation loop
- *  closes in CI. (See tests/ and JD item 4.)
+ *  closes in CI. (See tests/.)
  *
  *  REGISTER SEMANTICS, which are not uniform and must not be treated as such:
  *      RW    read/write, read-modify-write is safe (with a critical section)
@@ -25,9 +21,25 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ---- address map, one lane ---------------------------------------------- */
-#define LANE_STRIDE        0x100u
+/* ---- address map, one lane ----------------------------------------------
+ *
+ * REVISION 2. The first version gave the equaliser 8 FFE and 4 DFE taps and
+ * packed the whole lane into 256 bytes. Measured against the channel the part
+ * is specified for, that is not enough filter: at 30 dB the pulse response
+ * carries 1.78 UI of normalised ISI with a tail still at 5% of the cursor
+ * twelve symbols out, and a 4-tap DFE leaves more residual than a PAM4 eye is
+ * tall. The link closed at 12 dB and 20 dB and could not close at 26 or 30.
+ *
+ * So the tap count went to 16 FFE and 8 DFE and the aperture doubled to 512
+ * bytes to hold them. Real 100 GBd receivers are in this range for the same
+ * reason. Growing an aperture is a normal register-map revision; what matters
+ * is that the LANE_ID version field moves with it, so a driver can tell which
+ * silicon it is talking to before it starts writing tap addresses that used to
+ * mean something else.
+ */
+#define LANE_STRIDE        0x200u
 #define LANE_BASE(n)       ((uint32_t)(n) * LANE_STRIDE)
+#define HAL_MAX_LANES      8u          /* one macro's worth of apertures */
 
 #define REG_LANE_ID        0x000u   /* RO  [15:0] id, [31:16] version        */
 #define REG_CTRL           0x004u   /* RW                                    */
@@ -37,24 +49,25 @@
 #define REG_AFE_CTLE       0x014u   /* RW  [3:0]  CTLE peaking code          */
 #define REG_ADAPT_CTRL     0x018u   /* RW  enables + loop parameters         */
 #define REG_ADAPT_STAT     0x01Cu   /* RO  convergence flags                 */
-#define REG_FFE_TAP(i)     (0x020u + 4u * (uint32_t)(i))   /* RW, 8 taps     */
-#define REG_DFE_TAP(i)     (0x040u + 4u * (uint32_t)(i))   /* RW, 4 taps     */
-#define REG_CDR_PHASE      0x050u   /* RW  phase interpolator code           */
-#define REG_CDR_FREQ       0x054u   /* RO  accumulated frequency offset      */
-#define REG_GRAD_ACC(i)    (0x060u + 4u * (uint32_t)(i))   /* RO/W1C, 8      */
-#define REG_DFE_GRAD(i)    (0x080u + 4u * (uint32_t)(i))   /* RO/W1C, 4      */
-#define REG_AMP_ACC        0x090u   /* RO/W1C  |y| accumulator, for AGC      */
-#define REG_ERR_CNT        0x094u   /* RO/W1C  symbol errors                 */
-#define REG_SYM_CNT        0x098u   /* RO/W1C  symbols observed              */
-#define REG_EYE_CTRL       0x09Cu   /* RW  margining: phase + level          */
-#define REG_EYE_ERR        0x0A0u   /* RO/W1C  errors at that margin point   */
-#define REG_PLL_CTRL       0x0A4u   /* RW  [0] PLL_EN, [1] PLL_BYPASS        */
-#define REG_PLL_STAT       0x0A8u   /* RO  [0] LOCKED, [15:8] lock counter   */
-#define REG_MGMT_CTRL      0x0ACu   /* RW  [0] TX_EN                         */
-#define REG_MGMT_STAT      0x0B0u   /* RO  [15:0] free bytes in the TX FIFO  */
-#define REG_MGMT_DATA      0x0B4u   /* WO  push one byte into the TX FIFO    */
-#define REG_EYE_ADDR       0x0B8u   /* RW  index into the eye capture RAM    */
-#define REG_EYE_DATA       0x0BCu   /* RO  byte at REG_EYE_ADDR              */
+#define REG_FFE_TAP(i)     (0x020u + 4u * (uint32_t)(i))   /* RW, 16 taps    */
+#define REG_DFE_TAP(i)     (0x060u + 4u * (uint32_t)(i))   /* RW, 8 taps     */
+#define REG_GRAD_ACC(i)    (0x080u + 4u * (uint32_t)(i))   /* RO/W1C, 16     */
+#define REG_DFE_GRAD(i)    (0x0C0u + 4u * (uint32_t)(i))   /* RO/W1C, 8      */
+#define REG_CDR_PHASE      0x0E0u   /* RW  phase interpolator code           */
+#define REG_CDR_FREQ       0x0E4u   /* RO  accumulated frequency offset      */
+#define REG_AMP_ACC        0x0E8u   /* RO/W1C  |y| accumulator, for AGC      */
+#define REG_ERR_CNT        0x0ECu   /* RO/W1C  symbol errors                 */
+#define REG_SYM_CNT        0x0F0u   /* RO/W1C  symbols observed              */
+#define REG_EYE_CTRL       0x0F4u   /* RW  margining: phase + level          */
+#define REG_EYE_ERR        0x0F8u   /* RO/W1C  errors at that margin point   */
+#define REG_PLL_CTRL       0x0FCu   /* RW  [0] PLL_EN, [1] PLL_BYPASS        */
+#define REG_PLL_STAT       0x100u   /* RO  [0] LOCKED, [15:8] lock counter   */
+#define REG_MGMT_CTRL      0x104u   /* RW  [0] TX_EN                         */
+#define REG_MGMT_STAT      0x108u   /* RO  [15:0] free bytes in the TX FIFO  */
+#define REG_MGMT_DATA      0x10Cu   /* WO  push one byte into the TX FIFO    */
+#define REG_EYE_ADDR       0x110u   /* RW  index into the eye capture RAM    */
+#define REG_EYE_DATA       0x114u   /* RO  byte at REG_EYE_ADDR              */
+#define REG_CDR_CTRL       0x118u   /* RW  [5:0] timing-detector h1 target   */
 
 /* ---- CTRL ---------------------------------------------------------------- */
 #define CTRL_EN            (1u << 0)
@@ -82,6 +95,15 @@
 #define ADAPT_LEAK_MASK    (0xFu << 12)
 #define ADAPT_LEAK_SHIFT   12u
 
+/* ---- CDR_CTRL -----------------------------------------------------------
+ * The timing detector's h1 target, as a fraction of the cursor: target =
+ * code / 128, so 6 bits span 0 to 0.49 in steps of 0.008. It is a REGISTER,
+ * not a constant, because the right value depends on how asymmetric the
+ * channel is and firmware is the only thing that gets to find that out. */
+#define CDR_H1_MASK        0x0000003Fu
+#define CDR_H1_SHIFT       0u
+#define CDR_H1_SCALE       128.0
+
 /* ---- PLL / management ---------------------------------------------------- */
 #define PLL_EN             (1u << 0)
 #define PLL_BYPASS         (1u << 1)
@@ -101,8 +123,8 @@
 #define VGA_GAIN_CODES     (VGA_GAIN_MASK  + 1u)   /* 64 */
 #define CTLE_PEAK_CODES    (CTLE_PEAK_MASK + 1u)   /* 16 */
 
-#define NUM_FFE_TAPS       8u
-#define NUM_DFE_TAPS       4u
+#define NUM_FFE_TAPS       16u
+#define NUM_DFE_TAPS       8u
 
 /* ===========================================================================
  *  The firmware-facing API. Nothing else may touch hardware.
@@ -110,10 +132,49 @@
 uint32_t hal_read32 (uint32_t off);
 void     hal_write32(uint32_t off, uint32_t val);
 
-/* Read-modify-write of one field. Wrapped in a critical section because a
- * RMW is three bus transactions and `volatile` gives no atomicity: an ISR
- * that touches another field of the same register between our read and our
- * write would have its update silently erased. */
+/* ---- the lane window ----------------------------------------------------
+ * Eight lanes share one register map layout, one aperture each, LANE_STRIDE
+ * apart. Rather than add LANE_BASE(n) to every access in every firmware
+ * module -- which is a lot of places to forget it -- the base is held in a
+ * window register and every hal access is relative to it. That is how paged
+ * peripherals are actually addressed, and it means the per-lane control code
+ * is byte-identical no matter which lane it is servicing.
+ *
+ * THE HAZARD THAT COMES WITH IT: the window is shared mutable state. Anything
+ * that can preempt lane servicing -- an ISR, another task -- and touches a
+ * register will do it through whatever window happens to be selected, and on
+ * return the interrupted code carries on believing its own selection still
+ * holds. The bug is silent and it corrupts a DIFFERENT lane than the one being
+ * debugged, which is the worst possible failure to chase.
+ *
+ * So an interrupt handler must save and restore the window, exactly as it
+ * saves registers. This HAL's dispatcher does that directly around the
+ * handler call -- see hal_maybe_preempt() in hal.c -- and test_lane_window()
+ * asserts it by installing an ISR that deliberately repoints the window and
+ * checking the interrupted write still lands on the right lane.
+ *
+ * (An earlier version of this header advertised a hal_lane_push/pop pair here.
+ * They existed, were never called, and were wrong: push(1); push(2); pop();
+ * left the window on lane 2. Advertising an uncalled, broken implementation of
+ * the very hazard the paragraph above describes was worse than having none, so
+ * they are gone.) */
+void     hal_select_lane(unsigned lane);
+unsigned hal_current_lane(void);
+
+/* Read-modify-write of one field.
+ *
+ * NOTE WHAT THIS DOES NOT DO: it does not take a critical section for you. A
+ * RMW is three bus transactions and `volatile` gives no atomicity, so an ISR
+ * that touches another field of the same register between the read and the
+ * write has its update silently erased. The CALLER brackets it with
+ * hal_critical_enter/exit, and this function COUNTS whether the caller did --
+ * see hal_stats()->unguarded_rmw, which the unit tests assert is zero across
+ * the whole firmware.
+ *
+ * Counting rather than locking is deliberate. A lock in here would make every
+ * call safe and make the hazard untestable; the counter turns "the firmware
+ * never does an unguarded RMW" from a claim in a comment into an assertion in
+ * CI. test_rmw_preemption() exercises the lost update itself. */
 void     hal_field_set(uint32_t off, uint32_t mask, unsigned shift, uint32_t val);
 uint32_t hal_field_get(uint32_t off, uint32_t mask, unsigned shift);
 

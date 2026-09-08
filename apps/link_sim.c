@@ -6,7 +6,7 @@
  *  firmware in fw_*.c is the same source that would run on the control
  *  processor inside the macro; only the HAL's backing store differs.
  *
- *  Usage:  link_sim [IL_dB] [ppm] [optical|electrical]
+ *  Usage:  link_sim [IL_dB] [ppm] [optical|electrical] [noise_scale]
  * =========================================================================*/
 #include "fw.h"
 #include "hal.h"
@@ -14,13 +14,20 @@
 #include "eye.h"
 #include "fixed.h"
 #include "mgmt.h"
+#include "pcs.h"
+
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define TICK_MS      1u
-#define MAX_TICKS    3000u
+#define MAX_TICKS    8000u
+/* One block is 4094 scored symbols and a codeword is 2720, so this is roughly
+ * 300 codewords: enough to see the decoder work and cheap enough that the run
+ * still finishes in seconds. */
+#define TRAFFIC_TICKS 200u
 
 int main(int argc, char **argv)
 {
@@ -28,12 +35,19 @@ int main(int argc, char **argv)
     const double ppm = (argc > 2) ? atof(argv[2]) : 120.0;
     const afe_mode_t mode = (argc > 3 && strcmp(argv[3], "optical") == 0)
                           ? AFE_OPTICAL : AFE_ELECTRICAL;
+    /* Noise stress multiplier. At the nominal front-end noise a converged link
+     * makes no errors at all, which proves the receiver works but leaves the
+     * FEC with nothing to do. Turning this up walks the link down its
+     * waterfall so the code can be seen earning its 5.8% of overhead. */
+    const double noise = (argc > 4) ? atof(argv[4]) : 1.0;
 
     printf("=========================================================\n");
     printf(" %.0f Gb/s/lane PAM4 | %.0f GBd | Nyquist %.0f GHz | %u lanes = %.1f Tb/s\n",
            LANE_RATE_GBPS, BAUD_RATE_GBD, NYQUIST_GHZ, LANES_PER_CHIP, CHIP_TBPS);
     printf(" channel %.0f dB @ Nyquist | %.0f ppm ref offset | %s front end\n",
            il, ppm, (mode == AFE_OPTICAL) ? "optical (PD+TIA)" : "electrical");
+    printf(" RS(%u,%u) KP4 FEC on the payload | noise x%.2f\n",
+           RS_N, RS_K, noise);
     printf("=========================================================\n\n");
 
     hw_lane_t hw;
@@ -46,6 +60,7 @@ int main(int argc, char **argv)
      * magnitude below the 100 GBd data path. Everything about telemetry
      * pacing follows from that ratio. */
     hw_lane_attach_platform(&hw, 128u);
+    hw_lane_set_noise(&hw, noise);
 
     fw_link_t fw;
     fw_init(&fw);
@@ -61,14 +76,22 @@ int main(int argc, char **argv)
          * The ratio is the point: firmware runs at kHz, the datapath at
          * 100 GBd. Everything the firmware sees is an accumulated statistic,
          * never a per-symbol value. */
-        hw_lane_run(&hw, (fw.state == LS_EQ_TRAIN || fw.state == LS_CDR_LOCK) ? 1u : 0u);
+        const hw_mode_t run_mode =
+            (fw.state == LS_EQ_TRAIN || fw.state == LS_CDR_LOCK) ? HW_MODE_TRAIN
+          : (fw.state == LS_EQ_VERIFY)                            ? HW_MODE_VERIFY
+                                                                  : HW_MODE_DATA;
+        hw_lane_run(&hw, run_mode);
         fw_tick(&fw, t * TICK_MS);
 
         if (getenv("LINK_TRACE") && (t % 20u) == 0u) {
             printf("        .. t=%4u %-11s phase %6.2f mean(e) %+8.5f lock %4u ppm %+7.1f\n",
                    t, fw_state_name(fw.state), hw.cdr.phase, hw.cdr.ted_avg,
                    hw.cdr.lock_count, cdr_ppm(&hw.cdr));
-            printf("           adapt activity %d\n", fw_adapt_activity());
+            printf("           adapt activity %d  err/sym %u/%u  judge %llu/%llu\n",
+                   fw_adapt_activity(),
+                   hal_read32(REG_ERR_CNT), hal_read32(REG_SYM_CNT),
+                   (unsigned long long)fw.train_errs,
+                   (unsigned long long)fw.train_syms);
         }
         if (fw.state != last) {
             printf("  %5u  %-12s %-4u %-4u %-6u  %s\n", t, fw_state_name(fw.state),
@@ -99,6 +122,77 @@ int main(int argc, char **argv)
         printf("    b[%u] = %+4d\n", i, hal_read_signed(REG_DFE_TAP(i), TAP_APPLY_BITS));
     }
 
+    /* ---- carry real traffic and score the FEC --------------------------- */
+    /* Training is over. The payload switches from PRBS31 to RS(544,514)
+     * codewords, which is the only configuration in which a post-FEC number
+     * means anything: you cannot decode a training pattern. */
+    hw_lane_set_fec(&hw, 1u);
+    fec_stats_reset();
+    uint64_t last_err = 0u, last_bits = 0u;
+    for (unsigned k = 0; k < TRAFFIC_TICKS; ++k) {
+        hw_lane_run(&hw, HW_MODE_DATA);
+        fw_tick(&fw, (t + k) * TICK_MS);
+        if (getenv("LINK_TRACE") && (k < 12u || (k % 20u) == 19u)) {
+            const uint64_t de = hw.pcs_rx.pre_bit_errors - last_err;
+            const uint64_t db = hw.pcs_rx.bits - last_bits;
+            printf("        .. traffic k=%3u  window BER %.3e  taps %+3d %+3d %+3d | %+3d %+3d\n",
+                   k, db ? (double)de / (double)db : 0.0,
+                   hal_read_signed(REG_FFE_TAP(2), TAP_APPLY_BITS),
+                   hal_read_signed(REG_FFE_TAP(3), TAP_APPLY_BITS),
+                   hal_read_signed(REG_FFE_TAP(4), TAP_APPLY_BITS),
+                   hal_read_signed(REG_DFE_TAP(0), TAP_APPLY_BITS),
+                   hal_read_signed(REG_DFE_TAP(1), TAP_APPLY_BITS));
+            last_err = hw.pcs_rx.pre_bit_errors;
+            last_bits = hw.pcs_rx.bits;
+        }
+    }
+    t += TRAFFIC_TICKS;
+
+    const pcs_rx_t *pcs = &hw.pcs_rx;
+    printf("\n  FEC  --  RS(%u,%u) over GF(2^%u), t = %u symbols\n",
+           RS_N, RS_K, GF_M, RS_T);
+    printf("    equaliser latency   %u symbols (measured by pattern alignment)\n",
+           hw.pcs_lat);
+    printf("    residual offset     %u  (0 once the payload window is closed)\n",
+           pcs->align_offset);
+    printf("    alignment residual  %u bit errors over %u symbols\n",
+           pcs->align_errors, PCS_ALIGN_SYMS);
+    printf("    PAM4 confusion [tx][rx], %% of all symbols:\n");
+    for (unsigned a = 0; a < 4u; ++a) {
+        printf("      tx %u :", a);
+        for (unsigned b = 0; b < 4u; ++b) {
+            const double pct = (pcs->bits > 0u)
+                ? 100.0 * (double)pcs->confusion[a][b] /
+                  ((double)pcs->bits / (double)BITS_PER_SYMBOL) : 0.0;
+            printf(" %7.3f", pct);
+        }
+        printf("\n");
+    }
+    printf("    codewords decoded   %llu\n", (unsigned long long)pcs->codewords);
+    printf("    symbols corrected   %llu\n", (unsigned long long)pcs->corrected_symbols);
+    printf("    uncorrectable       %llu\n", (unsigned long long)pcs->uncorrectable);
+    if (pcs->bits > 0u) {
+        printf("    pre-FEC BER         %.3e\n", pcs_pre_fec_ber(pcs));
+    }
+    if (pcs->codewords > 0u) {
+        const uint64_t msg_bits = pcs->codewords * (uint64_t)RS_K * GF_M;
+        if (pcs->post_bit_errors == 0u) {
+            printf("    post-FEC BER        < %.1e   (no residual errors in %llu bits)\n",
+                   1.0 / (double)msg_bits, (unsigned long long)msg_bits);
+        } else {
+            printf("    post-FEC BER        %.3e\n", pcs_post_fec_ber(pcs));
+        }
+    }
+    /* KP4 is specified to deliver better than 1e-15 post-FEC given a pre-FEC
+     * BER at or below 2.4e-4. That one number is the contract between the
+     * SerDes and the PCS, and it is why the analogue side is allowed to hand
+     * up an eye that still looks imperfect. */
+    if (pcs->bits > 0u) {
+        const double pre = pcs_pre_fec_ber(pcs);
+        printf("    KP4 margin          %+.1f dB against the 2.4e-4 pre-FEC limit\n",
+               10.0 * log10(2.4e-4 / (pre > 0.0 ? pre : 1.0 / (double)pcs->bits)));
+    }
+
     /* ---- capture an eye, then let telemetry stream it out --------------- */
     eye_t eye;
     eye_init(&eye, -1.6, 1.6);
@@ -111,7 +205,7 @@ int main(int argc, char **argv)
      * on the wire, and the bus moves 128 bytes per tick -- so a full eye takes
      * ~8 ticks to stream while the link keeps running underneath it. */
     for (unsigned k = 0; k < 60u; ++k) {
-        hw_lane_run(&hw, 0u);
+        hw_lane_run(&hw, HW_MODE_DATA);
         fw_tick(&fw, (t + k) * TICK_MS);
     }
     printf("\n  telemetry\n");
@@ -120,12 +214,16 @@ int main(int argc, char **argv)
     printf("    AGC updates         %u\n", fw.tm.agc_updates);
     printf("    tap updates         %u\n", fw.tm.tap_updates);
     printf("    symbols observed    %llu\n", (unsigned long long)fw.tm.symbols);
-    printf("    bit errors          %llu\n", (unsigned long long)fw.tm.bit_errors);
-    if (fw.tm.symbols > 0u) {
-        const double ber = (double)fw.tm.bit_errors /
-                           ((double)fw.tm.symbols * (double)BITS_PER_SYMBOL);
-        printf("    pre-FEC BER         %.3e\n", ber);
-    }
+    /* The BER that belongs here is the one printed in the FEC section above,
+     * measured by the PCS against a pattern-aligned reference.
+     *
+     * This block used to print a second one, derived from tm.bit_errors. That
+     * number was structurally incapable of being non-zero: the hardware only
+     * counts errors when it is given a training symbol to compare against, and
+     * this counter is only read in LS_UP, where training is off. It printed a
+     * confident 0.000e+00 for the life of the project and hid a receiver whose
+     * CDR never locked. Deleting it is the point -- a metric that cannot fail
+     * is worse than no metric, because it is trusted. */
     printf("    CDR ppm estimate    %+.1f  (actual %+.1f)\n", cdr_ppm(&hw.cdr), ppm);
 
     printf("\n  management bus (telemetry out, ~1 Mb/s)\n");

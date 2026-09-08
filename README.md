@@ -21,21 +21,23 @@ vendor's silicon and contains nothing proprietary.
 
 ---
 
-## Where each job responsibility lives
+## Where things live
 
-| Responsibility | Implementation |
+| Concern | Implementation |
 |---|---|
-| Real-time embedded C for **data path control, management, and telemetry** | [`src/fw_bringup.c`](src/fw_bringup.c) -- bring-up FSM, per-state timeouts, exponential backoff, telemetry counters |
-| **Low-level drivers and HAL** to interface with DSP hardware blocks and registers | [`include/hal.h`](include/hal.h), [`src/hal.c`](src/hal.c) -- register map, `volatile` MMIO, W1C semantics, critical sections |
-| Firmware-based **adaptation for equaliser taps** | [`src/fw_adapt.c`](src/fw_adapt.c) -- sign-sign LMS supervisor, gear shifting, leakage |
-| Firmware-based **gain control (VGA/TIA)** | [`src/fw_agc.c`](src/fw_agc.c) -- AGC with VGA->TIA handoff |
-| **Unit tests and CI** across hardware revisions | [`tests/test_all.c`](tests/test_all.c) -- 73 checks, no hardware required |
-| **Fixed-point optimisation** for resource-constrained systems | [`include/fixed.h`](include/fixed.h) -- Q-format, saturation, accumulate-wide/apply-narrow |
+| Bring-up sequencing, timeouts, retry, telemetry | [`src/fw_bringup.c`](src/fw_bringup.c) -- the state machine, per-state timeouts, exponential backoff, counters |
+| Register interface and low-level access | [`include/hal.h`](include/hal.h), [`src/hal.c`](src/hal.c) -- register map, `volatile` MMIO, W1C semantics, critical sections, per-lane window |
+| Equaliser tap adaptation | [`src/fw_adapt.c`](src/fw_adapt.c) -- sign-sign LMS supervisor, gear shifting, leakage |
+| Gain control (VGA and TIA) | [`src/fw_agc.c`](src/fw_agc.c) -- AGC with the VGA-to-TIA handoff |
+| Forward error correction | [`src/fec.c`](src/fec.c), [`src/pcs.c`](src/pcs.c) -- RS(544,514) KP4, codeword framing, BER scoring |
+| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 150 checks |
+| Fixed-point arithmetic | [`include/fixed.h`](include/fixed.h) -- Q-format, saturation, accumulate-wide/apply-narrow |
 
-**No `fw_*.c` file contains a single floating-point operation.** Floats appear
-only in the hardware model, where they stand in for analogue physics.
-
----
+**No `fw_*.c` file contains a single floating-point operation, and none of them
+calls the hardware-side backend.** Both claims are enforced by a grep step in
+CI rather than asserted in a comment -- they had each been quietly violated
+once, and in both cases the violation wrote a register that nothing read, so
+nothing failed.
 
 ## Architecture
 
@@ -67,6 +69,10 @@ that substitution is the whole reason the tests can run without silicon.
 | `eq.c` | FFE/DFE datapath and the sign-sign gradient accumulators |
 | `cdr.c` | Mueller-Muller TED, type-2 PI loop, amplitude-normalised |
 | `eye.c` | eye-diagram accumulation, PGM and ASCII rendering |
+| `fec.c` | RS(544,514) over GF(2^10) -- KP4 -- with errors-and-erasures decoding |
+| `pcs.c` | codeword framing, BER-tester pattern alignment, pre/post-FEC scoring |
+| `touchstone.c` | Touchstone (.sNp) S-parameter reader |
+| `hw_macro.c` | eight coupled lanes and one round-robin supervisor |
 
 ---
 
@@ -75,12 +81,19 @@ that substitution is the whole reason the tests can run without silicon.
 Needs only MSVC Build Tools (or any C17 compiler).
 
 ```bat
-build.bat test_all           :: 49 unit tests, no hardware
-build.bat ch_probe 30        :: channel synthesis, verified against its own model
-build.bat cdr_probe 20 120   :: CDR loop in isolation, instrumented
-build.bat link_sim 20 120    :: full bring-up, eye diagram, telemetry
-build.bat test_all asan      :: any target under AddressSanitizer
+build.bat test_all                     :: 150 unit tests, no hardware
+build.bat ch_probe 20                  :: channel synthesis, checked against its own model
+build.bat ch_probe ..\data\pkg_backplane.s4p    :: the same, from S-parameters
+build.bat cdr_probe 20 -80             :: CDR loop in isolation, instrumented
+build.bat link_sim 20 -80              :: full bring-up, FEC, eye diagram, telemetry
+build.bat fec_probe                    :: KP4 self-test and coding-gain measurements
+build.bat s4p_gen ..\data\pkg_backplane.s4p 14  :: synthesise a 4-port channel file
+build.bat macro_sim 8 14               :: eight lanes, one supervisor
+build.bat macro_sim 8 14 0 4000 2      :: ...serviced two at a time
+build.bat test_all asan                :: any target under AddressSanitizer
 ```
+
+On Linux and macOS: `make test`, `./build.sh link_sim 20 -80`, or CMake.
 
 ---
 
@@ -116,7 +129,7 @@ worth building:
   rounding          -4,286   =  -1.5e-5 LSB per operation
 ```
 
-A 32,768??-- reduction in DC bias. In an open-loop filter that is a curiosity; in
+A 32,768x reduction in DC bias. In an open-loop filter that is a curiosity; in
 an LMS accumulator or a CDR loop filter it is the difference between a loop
 that holds and one that walks off target.
 
@@ -128,57 +141,267 @@ unguarded read-modify-write and never read-modify-writes a W1C register.
 
 ## Verified end to end
 
+A real run at 20 dB and -80 ppm, including the two failed attempts the search
+makes before it finds a workable front-end point:
+
 ```
   t[ms]  state        VGA  TIA  CTLE
-      0  WAIT_SIGNAL  32   8    12
-      1  AGC          32   8    12
-     12  CDR_LOCK     37   8    12
-     20  EQ_TRAIN     37   8    12
-    170  TRACK        37   8    12
-    177  UP           44   8    12
+      0  PLL_LOCK     32   8    8
+     10  AGC          32   8    8
+     22  CDR_LOCK     41   8    13
+    113  EQ_TRAIN     41   8    13
+    363  EQ_VERIFY    41   8    13
+    437  FAULT        35   8    13   <-- verification rejected this answer
+    440  PLL_LOCK     34   8    8
+    453  CDR_LOCK     43   8    15
+    753  FAULT        43   8    15   <-- CDR could not acquire here
+    758  PLL_LOCK     36   8    8
+    764  CDR_LOCK     37   8    8
+    824  EQ_TRAIN     37   8    8
+   1074  EQ_VERIFY    37   8    8
+   1148  TRACK        37   8    8
+   1149  UP           37   8    8
 
-  LINK UP after 177 ms
+  LINK UP after 1149 ms
 
-  converged FFE taps           HAL access audit
-    w[2] =   -3                  read-modify-writes  226
-    w[3] =  +24                  UNGUARDED RMW         0  (ok)
-    w[4] =   -3                  W1C RMW bugs          0  (ok)
+  FEC  --  RS(544,514) over GF(2^10), t = 15 symbols
+    equaliser latency   5 symbols (measured by pattern alignment)
+    codewords decoded   298
+    uncorrectable       0
+    pre-FEC BER         0.000e+00
+    post-FEC BER        < 6.5e-07   (no residual errors in 1531720 bits)
+    KP4 margin          +25.9 dB against the 2.4e-4 pre-FEC limit
+
+  HAL access audit
+    read-modify-writes  1424
+    UNGUARDED RMW          0  (ok)
+    W1C RMW bugs           0  (ok)
 ```
 
-Cursor pulled down with negative neighbours either side -- an FFE cancelling
-pre- and post-cursor ISI. `49 checks, 0 failures`.
+`150 checks, 0 failures`.
+
+The two `FAULT`s are the point, not noise. The first attempt converged and was
+**rejected by verification** -- every loop reported success and the measured
+error rate said otherwise. The second could not get the CDR to acquire at all.
+Neither was allowed to bring the link up.
+
+**The BER above is measured, and that sentence needs saying because it was not
+always true.** An earlier version of this project reported `pre-FEC BER
+0.000e+00` from a counter that only incremented during training and was only
+read in `LS_UP`, where training is off. It was structurally incapable of being
+non-zero, and it hid a receiver whose CDR never locked at all. Everything in
+the bug table below was found after replacing it with a real measurement.
 
 ## Operating range
 
-Every configuration below brings the link up with zero pre-FEC bit errors:
+Swept across channel loss and reference offset, carrying RS-encoded traffic,
+BER measured against a pattern-aligned reference. Each cell is the pre-FEC BER
+and whether the payload came out of the decoder clean:
 
-| channel | ref offset | link up | note |
+| channel | -200 ppm | -80 ppm | +120 ppm |
 |---|---|---|---|
-| 12 dB | +50 ppm | 173 ms | |
-| 16 dB | 0 ppm | 170 ms | |
-| 20 dB | +120 ppm | 343 ms | |
-| 20 dB | -80 ppm | 174 ms | |
-| 20 dB | -200 ppm | 178 ms | |
-| 26 dB | +120 ppm | 179 ms | |
-| 30 dB | +120 ppm | 180 ms | |
+| 4 dB  | **0** clean | **0** clean | **0** clean |
+| 8 dB  | **0** clean | **0** clean | 6.2e-7 clean |
+| 12 dB | **0** clean | **0** clean | **0** clean |
+| 16 dB | 1.2e-6 clean | 4.0e-4 errors | 1.5e-4 errors |
+| 20 dB | 2.3e-5 clean | 3.6e-4 errors | 1.9e-5 clean |
+| 24 dB | 6.5e-4 errors | 2.5e-4 errors | 1.2e-4 errors |
+| 28 dB and above | did not come up | did not come up | did not come up |
+
+Bring-up takes 350 ms to 2.7 s, depending on how many front-end operating
+points the search has to try.
+
+**4, 8 and 12 dB are clean at every reference offset -- zero pre-FEC errors
+over 1.5 million bits. 16 to 24 dB is marginal. Above 24 dB the link does not
+come up, and the state machine says so rather than pretending.**
+
+That last part is the change that matters most. Bring-up measures its own error
+rate, decision-directed, before declaring the link up, so a converged-but-wrong
+solution is rejected and retried instead of shipped. An earlier version brought
+the link up at 12 dB with every loop converged, every status bit green, and a
+pre-FEC BER of 7.6e-2.
+
+### The result worth stopping on
+
+Look at 16 dB / +120 ppm: **pre-FEC 1.5e-4, comfortably inside the 2.4e-4 that
+KP4 is specified against -- and the payload still comes out with errors.**
+
+That is not a contradiction, it is the specification being read too loosely.
+The 2.4e-4 figure assumes errors that are roughly INDEPENDENT. These are not:
+they arrive in bursts, because a DFE that mis-slices feeds the wrong decision
+back and corrupts the next several symbols. Most 20-block windows measure
+exactly zero and an occasional one measures 2.6e-3. A burst long enough to put
+more than 15 corrupted symbols into one codeword is uncorrectable no matter how
+good the average looks.
+
+**A mean pre-FEC BER is not sufficient to size a FEC. The error DISTRIBUTION is
+part of the specification, and quoting the average alone is how a link passes on
+paper and fails on the bench.** It is also exactly why the decoder here supports
+erasures: when something else already knows where the burst was, the survivable
+burst length doubles.
+
+## FEC -- RS(544,514), the KP4 code
+
+`fec_probe` self-tests the codec, then measures what it buys.
+
+```
+  1. codec self-test
+     clean codewords ............................ ok
+     1..15 symbol errors, hard decision .......... ok
+     1..30 erasures ............................. ok
+     2*errors + erasures <= 30 .................. ok
+     beyond budget: 40/40 declared uncorrectable, 0 miscorrected
+
+  4. burst errors with the burst LOCATION known
+     burst    hard decode    burst positions erased
+     15        60/60          60/60
+     16         0/60          60/60
+     30         0/60          60/60
+     31         0/60           0/60
+```
+
+Both cliffs land exactly where the algebra says: 15 symbols hard, 30 with the
+positions marked, because an erasure costs one parity symbol and an error costs
+two.
+
+**A measured negative result, kept because it is worth more than a plausible
+claim.** The obvious way to get soft-decision gain is to flag samples that land
+near a slicer threshold and erase those symbols. Measured, it does not pay:
+
+```
+  margin   flags    errors    covered   hard fail soft fail
+  0.010    7.2      14.7      3.3       52        62
+  0.020    14.8     14.8      5.8       54        75
+  0.085    87.8     15.3      14.0      60        60
+```
+
+The trade needs `flags < 2 x (errors actually covered)` and the table never
+satisfies it. The reason is geometric: PAM4 has three thresholds and its inner
+levels sit between two of them, so the population *near* a threshold is several
+times the population that *crossed* one, at every margin. This is why KP4 in
+Ethernet is a hard-decision code, and why real soft gain needs a soft-decision
+*code* rather than a hard code fed reliability flags.
+
+Where erasures do pay is side information -- a burst whose location something
+else already knows: a loss-of-lock flag, a lane error counter, a bring-up FSM
+not yet in TRACK. That costs no false flags, and it doubles the survivable
+burst.
+
+## Measured S-parameters
+
+`touchstone.c` reads a Touchstone v1 file; `channel.c` turns it into an impulse
+response by interpolating magnitude and **unwrapped phase** separately,
+extrapolating the loss trend and group delay above the measured band, and
+removing the bulk propagation delay.
+
+Three things a fitted `a*sqrt(f) + b*f` loss curve cannot express, all visible
+in `ch_probe` output from a 4-port file:
+
+```
+      50.0         -27.63   <- Nyquist
+      62.0         -56.30                 <- via-stub notch
+  long tail:
+    +  9 UI   +0.00619
+    + 10 UI   +0.00657                    <- reflection echo, 2 x 55 ps
+    + 11 UI   +0.00720
+    + 12 UI   +0.00502
+  far-end crosstalk
+    peak coupling   -42.4 dB below the through peak
+```
+
+I do not have a measured file I can publish, so `s4p_gen.c` synthesises one
+from physics -- skin and dielectric loss, two impedance discontinuities summed
+as a geometric series, a quarter-wave open stub, and frequency-rising FEXT --
+and every file it writes says **SYNTHESISED, NOT MEASURED** on its first line.
+The reader takes a real vendor sweep unchanged.
+
+The reader handles the format's genuine wart: Touchstone v1 stores a 2-port
+**column major** (`S11 S21 S12 S22`) and every other port count row major.
+Reading a `.s2p` row major silently swaps the through path with the reverse
+one, which on a reciprocal passive channel is nearly invisible -- until it is
+not. There is a unit test for it.
+
+## Multi-lane -- eight lanes, one processor
+
+`hw_macro.c` runs eight lanes side by side. What only appears at this scale:
+
+- **Crosstalk.** Every lane's transmitter must run before any lane's receiver,
+  because lane 0 is aggressed by the block lane 1 is sending *now*. Doing it
+  lane-at-a-time shifts all the crosstalk by a block, which is invisible in a
+  BER number and completely wrong.
+- **Every lane must carry different data.** Give eight lanes the same PRBS seed
+  and the crosstalk arriving at a victim is a filtered copy of its own signal --
+  perfectly correlated, well behaved, and entirely fictional.
+- **Per-lane state.** One control processor serves all eight, so every loop
+  accumulator, IIR and settle counter exists per lane. Leave them global and
+  the macro converges to the average of eight different channels while each
+  lane reports itself converged.
+- **A windowed register file.** `hal_select_lane()` gives each lane an aperture
+  and keeps the per-lane firmware byte-identical. The hazard that comes with it
+  is that the window is shared mutable state: an ISR that repoints it and
+  returns leaves the interrupted code writing a neighbour's registers. The HAL
+  saves and restores it, and there is a test that fails if it stops.
+- **Loop bandwidth divided by the service rate.** A lane serviced every N
+  blocks gets one control iteration every N milliseconds, so every timeout has
+  to scale with how many lanes share the CPU. A single-lane bench passes
+  without this and the product does not.
+
+Eight lanes, losses spread 10 to 18 dB and reference offsets spread -200 to
++120 ppm, one supervisor:
+
+```
+  lane  IL@Nyq   ppm     state      VGA  CTLE   pre-FEC BER   post-FEC
+  0     10.00    -200    UP         27   6      0.000e+00     clean
+  1     11.15    -154    UP         30   8      0.000e+00     clean
+  2     12.29    -109    UP         30   8      0.000e+00     clean
+  3     13.44     -63    UP         32   10     0.000e+00     clean
+  4     14.58     -17    EQ_TRAIN   34   15     3.7e-02       --
+  5     15.72     +29    EQ_TRAIN   34   15     1.7e-01       --
+  6     16.86     +74    EQ_TRAIN   34   15     1.6e-01       --
+  7     18.00    +120    UP         34   8      0.000e+00     clean
+
+  5 of 8 lanes up      lanes 0,1,2,3 up within 430 ms; lane 7 at 1024 ms
+  supervisor services  equal across all eight -- the round robin starves nobody
+  UNGUARDED RMW        0   (ok)
+  W1C RMW bugs         0   (ok)
+  bytes dropped        0   (ok)
+```
+
+Five lanes carry FEC traffic with **zero pre-FEC errors**. The three that do not
+come up sit at 14.6 to 16.9 dB -- the same search-coverage gap the single-lane
+sweep shows at 16 dB, and they all land on the maximum CTLE code, which is the
+signature of the loss estimate overshooting. It is one bug, not three, and it
+is in the front-end search rather than the datapath.
+
+Rows that differ are the point: identical rows would mean the per-lane contexts
+are not independent.
 
 ## Known limitations
 
 Stated plainly rather than hidden.
 
-- **The CDR frequency readout is biased for positive offsets.** `cdr_ppm()`
-  reports the loop integrator, and that integrator absorbs both the true
-  frequency offset and the residual DC in a Mueller-Muller TED -- which on a
-  minimum-phase channel does not vanish even after equalisation. Negative
-  offsets read accurately (-76 against -80); positive ones drive the integrator
-  to its anti-windup limit. The loop still holds phase and the link runs
-  error-free, so this is a readout defect rather than a tracking one, but it is
-  a defect. A real part reports ppm by counting phase-interpolator rollovers
+- **Above about 24 dB the link does not close.** The equaliser is 16 FFE and 8
+  DFE taps against a channel whose normalised ISI at 30 dB is 1.78 UI with a
+  tail still at 5% of the cursor twelve symbols out. Lengthening the equaliser
+  further is the obvious next step; widening the CTLE's peaking range was tried
+  and made every operating point *worse*, because the pole and zero move with
+  the step size and the shape of the boost matters more than its size.
+- **16 to 24 dB is marginal** -- the link comes up at every reference offset
+  but the residual error rate is 1e-4 to 7e-4, so some of those points miss the
+  KP4 limit. The errors are bursts rather than a raised floor (see above), and
+  the front-end search finds a clean point at neighbouring losses, so this is a
+  search-coverage and burst-length problem rather than a hard capability limit.
+- **DFE error propagation produces bursts longer than KP4 can correct.** Real,
+  correctly modelled, and the reason erasure decoding is implemented.
+- **`cdr_ppm()` carries a constant offset of about -6 ppm.** It tracks with
+  unity slope across -200 to +120 ppm; the offset is residual Mueller-Muller DC
+  absorbed by the integrator. A real part counts phase-interpolator rollovers
   over a known interval instead of trusting a loop-internal value.
-- Ideal FEC. No RS-FEC or LDPC layer, so BER is pre-FEC only.
-- The channel is a fitted two-term loss model, not measured S-parameters. No
-  reflections, no crosstalk, no via stubs.
-- Single lane. The 48-lane figure is a specification, not a simulated array.
+- The published `.s4p` is synthesised from physics, not measured. The reader
+  takes a real one unchanged.
+- Crosstalk is modelled from the off-diagonal S-parameters with
+  nearest-neighbour weights, not from a full 16-port coupled extraction.
+
 ## Bugs found while building this
 
 Documented where they occurred, because the diagnosis is worth more than the
@@ -199,6 +422,26 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | Include guard `EYE_H` collided with a constant `EYE_H` | -- |
 | ppm drift applied outside the CDR''s phase wrap | The drift is added even while the CDR is disabled during AGC, but the phase is only wrapped inside `cdr_update()`. It ran away unbounded; negative offsets drove it below zero, `cdr_sample()` clamped to index 0, and every symbol in the block read the same sample. Negative ppm failed 100% of the time. |
 | AGC limit-cycled on single-block measurements | One block of mean-\|y\| is a noisy estimate. The loop stepped, overshot, stepped back, and never accumulated the consecutive in-band blocks that declare convergence -- it hunted between VGA 27 and 32 for the full timeout. Fixed with a single-pole IIR on the measurement and a deadband wider than one gain code (0.476 dB = 5.6% = ~154 units at this target). |
+| **A pre-FEC BER counter that could only ever read zero** | `REG_ERR_CNT` is only incremented during training; telemetry only read it in `LS_UP`, where training is off. The headline result of the whole project was structurally incapable of being non-zero, and it hid everything below. |
+| **The CDR was tapped off the equaliser output** | Mueller-Muller's entire output is `h(+1) - h(-1)`, which is exactly what the FFE and DFE exist to null. Two loops driven from one node, and the tap loop -- with 24 degrees of freedom against the timing loop's one -- wins. The detector's peak output measured under 0.005 where a working one gives 0.1 to 0.5. It was not inverted so much as absent. |
+| Mueller-Muller sign inverted **again**, and the header disagreed with the .c | `cdr.h` documented `a[n-1]*y[n] - a[n]*y[n-1]`; `cdr.c` implemented the negation. Neither comment mentioned the other. |
+| A lock detector that reported LOCKED while the phase swept the whole UI | Three separate reasons, and all three had to be closed: a uniformly sweeping phase also gives mean(e) ~ 0; the "frequency estimate has stopped moving" test is *guaranteed* to pass when the anti-windup clamp engages, because a clamped integrator has stopped by definition; and the wrap condition the comment claimed as independent was never in the predicate at all. |
+| Loop gains sized for a detector gain of one | `zeta = kp/(2*sqrt(ki))` is the `Kd = 1` special case. At the real detector gain the loop was badly underdamped, not critically damped as the comment claimed. |
+| Amplitude normaliser quadratic where the error is linear | `e /= (amp^2 + 0.55)` peaks at an amplitude of 1.11 and falls away either side -- gain varied 1.9x over the range the AGC actually visits, which is the opposite of the amplitude independence it was there to provide. At the AGC's own target it evaluated to 0.994: a divide by one. |
+| The DFE fed back its own decisions during data-aided training | While the eye is closed those decisions are wrong a third of the time, so the tap gradients correlate against noise and the loop sits at its initial spike reporting convergence. |
+| The training reference was not delayed by the pipeline latency | Comparing a decision against the symbol that produced it three positions later gives 1.0 bit errors per symbol -- a confident, stable 50% BER. |
+| Convergence threshold not scaled when the tap count tripled | A budget of 3 codes summed over 24 taps demands each tap hold to an eighth of a code, which dither never achieves. Convergence was never declared and bring-up retried forever against a loop that had settled. |
+| **The channel forgot its own memory at every block boundary** | `channel_apply` restarted the convolution from zero each call, so the first 48 UI of every block were convolved against silence. That put a 2.4e-4 floor on the training BER -- *exactly* the KP4 limit -- and made bring-up reject a receiver that was working. A model that manufactures errors at the specification limit is worse than no model. |
+| Bring-up declared UP without ever measuring the error rate | Every test asked whether a loop had stopped moving; none asked whether the answer was any good. A CDR can hold a rock-steady phase at the wrong point in the eye and the taps will then converge to the best filter for that wrong phase. Measured at 12 dB: every loop converged, every status bit green, pre-FEC BER 7.6e-2. |
+| Verification that was not verifying the thing that would run | Data-aided verification hands the DFE perfect feedback, so it never propagates an error. Decision-directed it does. Measured at 12 dB: zero errors data-aided, 7.7e-2 decision-directed -- a factor of a thousand between the number measured and the number shipped. |
+| `build.bat` labels broken by mixed line endings | `.gitattributes` pins `*.bat` to CRLF, but a working copy with LF-only lines makes `cmd` seek to the wrong byte offset and lose its `goto` targets. The build silently ran stale binaries. |
+| **Firmware crossed its own seam, twice** | `fw_bringup.c` called the hardware-side backend to raise `STAT_AGC_CONV`, and `fw_adapt.c` read-modify-wrote `REG_ADAPT_STAT`, which the map declares RO -- using a bit constant from a *different* register's namespace, so it meant the right thing only by numerical accident. Both wrote values that **nothing read**, which is why nothing ever failed. The seam is the central claim of the project and it was only ever violated to produce dead data. CI now greps `src/fw_*.c` for it, because a claim that lives in a header is a claim that drifts. |
+| The HAL header made three statements its own code contradicts | It said `hal_field_set` was "wrapped in a critical section" -- it is not, and the suite's best test proves it is not, by firing an ISR at the read-modify-write and watching the update vanish. It said the ISR path used `hal_lane_push/pop` -- it uses a direct save/restore. And it named `test_lane_window_isr()` as the proof, a function that does not exist. A comment that states a guarantee is a specification; when the code does not honour it, the comment has become a defect, and one that advertises where to look. |
+| `hal_lane_push` / `hal_lane_pop`: dead, and broken | Zero callers. Also wrong: `push(1); push(2); pop();` leaves the window on lane 2. It was an uncalled, incorrect implementation of the exact hazard the paragraph above it describes, advertised in the header as the mitigation. Deleted. |
+| Every crosstalk aggressor shared one overlap-add tail | The crosstalk filter carries state between blocks, and that state lived on the *victim's* channel. Running three neighbours through it in turn meant the residue left by neighbour -3 at the end of a block was emitted at the start of the next one scaled by neighbour +1's coupling weight. Superposition *inside* a block was exact; only the boundary term was wrong -- which no BER number would ever show. Fixed by using linearity: sum the aggressors' waveforms first and filter once, which is the same arithmetic with one state variable instead of N, and one FFT pass instead of N. |
+| The most-commented feature in the macro was arithmetically inert | Twenty lines explaining that a supervisor servicing 2 of 8 lanes divides every control loop's bandwidth by four -- attached to code where `service` was assigned `n_lanes`, making the scale factor identically 1 and `MACRO_SERVICE` unreferenced. The mechanism was real and the explanation was right; it was simply never exercised. Now a parameter, with the eight-lane case runnable both ways. |
+| `channel_pulse_response()` used the streaming convolution | So a single-shot measurement started from whatever inter-block state the channel was carrying, and then left its own tail behind for the next real block. `hw_lane_init()` calls it to seed the training-reference delay, so the pollution landed on the first block of every link. |
+| A metric that could not fail, still printing after being "replaced" | The README said the vacuous pre-FEC counter had been replaced by a real measurement. The real measurement was added; the old one was left in, still printing a confident `0.000e+00` two lines below it. Removed, and the telemetry field with it, because a number that cannot be non-zero is worse than no number -- it gets trusted. |
 
 ## Telemetry over a management bus
 
@@ -280,9 +523,14 @@ you: it guarantees the accesses happen, not that they happen atomically.
 
 ## What I would add next
 
-- **FEC.** RS-FEC (KP4) or LDPC, so BER is post-FEC and soft-decision gain is
-  visible. Currently pre-FEC only.
-- **Measured S-parameters** instead of a fitted two-term loss model -- no
-  reflections, no crosstalk, no via stubs today.
-- **Multi-lane.** The 48-lane figure is a specification; one lane is simulated.
-
+- **A longer equaliser.** 16 FFE and 8 DFE taps close 24 dB; 30 dB needs more,
+  and the register aperture already has room for it.
+- **Close the search-coverage gap at 16 dB.** The front-end operating point is
+  inferred from the AGC's converged gain code, which is a good estimate and not
+  a perfect one. A second refinement pass, or adapting the CTLE code directly
+  against the error counter, would remove the retries.
+- **An LDPC inner code**, to get the soft-decision gain that `fec_probe` shows
+  a hard code fed reliability flags cannot deliver.
+- **Error-propagation mitigation in the DFE** -- burst detection feeding the
+  erasure decoder, which the codec already supports and nothing currently
+  drives.

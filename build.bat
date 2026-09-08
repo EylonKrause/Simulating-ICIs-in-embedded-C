@@ -1,26 +1,43 @@
 @echo off
 REM ===========================================================================
-REM  build.bat <app>            e.g.  build.bat ch_probe
+REM  build.bat <target> [asan] [args...]        e.g.  build.bat ch_probe 30
 REM
-REM  Compiles every src\*.c plus apps\<app>.c into out\<app>.exe and runs it.
-REM  C17, /W4, strict.  build.bat <app> [asan] [app args...]
+REM  Compiles every src\*.c plus apps\<target>.c (or tests\<target>.c) into
+REM  out\<target>.exe and runs it.  C17, /W4, strict.
+REM
+REM  No GOTO labels are used below. A .bat file with LF-only line endings
+REM  loses its labels -- cmd re-seeks the file by byte offset and lands in the
+REM  wrong place -- which is why .gitattributes pins *.bat to CRLF and why the
+REM  argument handling here is done with FOR rather than a SHIFT loop.
 REM ===========================================================================
 setlocal EnableDelayedExpansion
 
+set "ROOT=%~dp0"
+
 if "%~1"=="" (
-    echo usage: build.bat ^<app^> [asan]
-    echo   apps available:
-    for %%F in ("%~dp0apps\*.c") do echo     %%~nF
+    echo usage: build.bat ^<target^> [asan] [args...]
+    echo   targets available:
+    for %%F in ("%ROOT%apps\*.c" "%ROOT%tests\*.c") do echo     %%~nF
     exit /b 1
 )
 
-set "ROOT=%~dp0"
 set "APPNAME=%~1"
 set "APPSRC=%ROOT%apps\%APPNAME%.c"
 if not exist "%APPSRC%" set "APPSRC=%ROOT%tests\%APPNAME%.c"
 if not exist "%APPSRC%" (
-    echo error: no such source: %APPNAME%.c in apps\ or tests\
+    echo error: no such target: %APPNAME%.c in apps\ or tests\
     exit /b 1
+)
+
+REM everything after the target name
+set "REST="
+for /f "tokens=1,* delims= " %%a in ("%*") do set "REST=%%b"
+
+set "ASAN="
+if /i "%~2"=="asan" (
+    set "ASAN=1"
+    set "REST="
+    for /f "tokens=1,2,* delims= " %%a in ("%*") do set "REST=%%c"
 )
 
 set "VCVARS="
@@ -39,18 +56,7 @@ if not defined VSCMD_VER call "%VCVARS%" >nul 2>nul
 if not exist "%ROOT%out" mkdir "%ROOT%out"
 
 set "FLAGS=/nologo /std:c17 /W4 /O2 /I "%ROOT%include" /diagnostics:caret"
-if /i "%~2"=="asan" set "FLAGS=%FLAGS% /fsanitize=address /Zi"
-
-REM forward remaining args to the program: drop the app name, and "asan" if given
-shift
-if /i "%~1"=="asan" shift
-set "APPARGS="
-:collect
-if "%~1"=="" goto collected
-set "APPARGS=!APPARGS! %~1"
-shift
-goto collect
-:collected
+if defined ASAN set "FLAGS=%FLAGS% /fsanitize=address /Zi"
 
 pushd "%ROOT%out"
 cl %FLAGS% "%ROOT%src\*.c" "%APPSRC%" /Fe:"%APPNAME%.exe"
@@ -62,9 +68,7 @@ if errorlevel 1 (
 )
 echo.
 echo === run ===
-"%ROOT%out\%APPNAME%.exe"!APPARGS!
+"%ROOT%out\%APPNAME%.exe" !REST!
 set "RC=!errorlevel!"
 popd
 exit /b %RC%
-
-

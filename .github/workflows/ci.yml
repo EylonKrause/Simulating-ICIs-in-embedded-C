@@ -26,6 +26,23 @@ jobs:
       - name: Compiler version
         run: ${{ matrix.cc }} --version
 
+      # The central claim of this project is that firmware reaches the datapath
+      # ONLY through the register interface. Two violations had crept in and
+      # both wrote bits that nothing read, so nothing failed. Assert the claim
+      # rather than repeating it in a header.
+      - name: Firmware never calls the hardware-side backend
+        run: |
+          if grep -nE 'hw_reg_set|hw_reg_get|hw_status_set|hw_lane_|hw_macro_' src/fw_*.c; then
+            echo "::error::a fw_*.c file reached around the register interface"
+            exit 1
+          fi
+      - name: Firmware contains no floating point
+        run: |
+          if grep -nE '\b(float|double)\b' src/fw_*.c; then
+            echo "::error::floating point found in the firmware layer"
+            exit 1
+          fi
+
       - name: Build (make)
         run: make CC=${{ matrix.cc }}
 

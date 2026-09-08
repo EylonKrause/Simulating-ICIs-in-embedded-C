@@ -1,8 +1,6 @@
 /* ===========================================================================
  *  pll.h -- the reference PLL that clocks the whole lane.
  *
- *  JD: "...manages critical power-on, reset, and calibration sequences..."
- *
  *  This is the first thing that has to come up and the one every other loop
  *  depends on. A CDR cannot recover a clock if there is no clock to recover
  *  against, so bring-up order is:

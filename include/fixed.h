@@ -1,9 +1,6 @@
 /* ===========================================================================
  *  fixed.h -- fixed-point arithmetic for the firmware side.
  *
- *  JD: "Fixed-Point arithmetic optimization for resource-constrained
- *       embedded systems"
- *
  *  Everything the firmware computes is fixed point. There is no float in any
  *  fw_*.c translation unit -- the target is a control processor embedded in
  *  the SerDes macro, with no FPU. Floats appear only in the hardware/physics

@@ -8,6 +8,7 @@
 void eq_init(eq_t *e)
 {
     memset(e, 0, sizeof(*e));
+    e->scoring = 1u;
     e->w[FFE_CURSOR] = 1.0;          /* centre spike: pass-through to start */
 }
 
@@ -48,13 +49,14 @@ real_t eq_step(eq_t *e, real_t y_in, unsigned train_sym, unsigned *sym_out)
      * decision. Data-aided converges to the true MMSE solution; decision-
      * directed can lock onto a degenerate one when the eye starts closed,
      * which is exactly the situation during bring-up. Hence training first. */
-    const real_t ref = (train_sym == 0xFFFFFFFFu) ? pam4_level(sym)
-                                                  : pam4_level(train_sym);
+    const real_t ref = (train_sym == 0xFFFFFFFFu || e->dd)
+                     ? pam4_level(sym)
+                     : pam4_level(train_sym);
     const real_t err = ref - y;
 
     /* --- what real hardware accumulates ---------------------------------
      * Sign-sign: one comparator per operand, an add or a subtract, no
-     * multiplier. At 100 GBd with 12 taps a full multiplier per tap per
+     * multiplier. At 100 GBd with 24 taps a full multiplier per tap per
      * symbol is not affordable in area or power -- that, and not convergence
      * quality, is why sign-sign LMS is what silicon implements. */
     const int32_t se = (int32_t)sgn32((int32_t)(err * 32768.0));
@@ -67,15 +69,31 @@ real_t eq_step(eq_t *e, real_t y_in, unsigned train_sym, unsigned *sym_out)
 
     e->amp_acc += (int32_t)(fabs(y) * 4096.0);
     e->sym_cnt++;
-    if (train_sym != 0xFFFFFFFFu && sym != train_sym) {
+    if (train_sym != 0xFFFFFFFFu && e->scoring && sym != train_sym) {
         e->err_cnt += pam4_bit_errors(sym, train_sym);
     }
 
-    /* shift the decision history AFTER using it */
+    /* Shift the decision history AFTER using it.
+     *
+     * DURING TRAINING THIS MUST BE THE KNOWN SYMBOL, NOT OUR OWN DECISION.
+     * A DFE subtracts postcursor ISI reconstructed from past decisions, so
+     * while the eye is still closed those decisions are wrong about a third of
+     * the time, the reconstruction is wrong, the next decision is worse, and
+     * the tap gradients correlate against noise instead of against the
+     * channel. The loop then sits still at its initial spike and reports a
+     * converged, unequalised link -- which is exactly what this model did
+     * until the reference was aligned and the BER became measurable.
+     *
+     * Feeding the training pattern into the feedback path breaks that
+     * circularity: the DFE learns the true postcursors first, the eye opens,
+     * and only then does the switch to decision-directed operation become
+     * safe. Every real link trains this way for the same reason. */
     for (unsigned i = DFE_TAPS - 1u; i > 0u; --i) {
         e->d[i] = e->d[i - 1u];
     }
-    e->d[0] = pam4_level(sym);
+    e->d[0] = (train_sym == 0xFFFFFFFFu || e->dd)
+                  ? pam4_level(sym)
+                  : pam4_level(train_sym);
 
     return y;
 }

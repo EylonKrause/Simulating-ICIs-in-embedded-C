@@ -2,8 +2,6 @@
  *  mgmt.h -- the low-speed management interface, and the telemetry framing
  *           that travels over it.
  *
- *  JD: "...data path control, management, and telemetry."
- *
  *  WHY THIS EXISTS. A previous version of this project wrote the eye diagram
  *  to eye.pgm. Real silicon cannot write a file. Everything a host learns
  *  about a lane arrives as bytes over a slow side-channel -- I2C, SPI, a

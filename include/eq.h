@@ -29,9 +29,19 @@
 #include "link_config.h"
 #include "hal.h"
 
-#define FFE_TAPS    NUM_FFE_TAPS      /* 8 */
-#define FFE_CURSOR  3u
-#define DFE_TAPS    NUM_DFE_TAPS      /* 4 */
+#define FFE_TAPS    NUM_FFE_TAPS      /* 16 */
+/* Which tap the cursor sits on: 4 precursor taps ahead of it and 11 postcursor
+ * taps behind. Taps BELOW the cursor index hold newer samples and so cancel
+ * PREcursor ISI; taps above hold older samples and cancel POSTcursor ISI.
+ *
+ * A minimum-phase channel has little precursor and a long postcursor tail, so
+ * the split is deliberately lopsided. The value is measured, not assumed --
+ * swept over 3, 4, 5 and 6 at 8, 16, 20 and 24 dB. Four was the only choice
+ * that improved on three everywhere (24 dB went from 9.5e-4 to 3.0e-4) without
+ * losing an operating point; six was better still at 24 dB and stopped 16 dB
+ * coming up at all. */
+#define FFE_CURSOR  4u
+#define DFE_TAPS    NUM_DFE_TAPS      /* 8  */
 
 /* Applied tap code -> real weight. The hardware register holds a small signed
  * integer; this is the DAC that turns it into an analogue/digital weight. */
@@ -47,6 +57,33 @@ typedef struct {
     int32_t  amp_acc;            /* |y| accumulator, feeds the AGC           */
     uint32_t sym_cnt;
     uint32_t err_cnt;
+    /* Set by the lane model before each eq_step: whether this symbol counts
+     * toward the error statistic. The first few symbols of a simulation block
+     * are a block-boundary artefact -- their training reference reaches back
+     * into the previous block and the receiver pipeline straddles the seam --
+     * so they are equalised and adapted on, but not SCORED. The firmware's
+     * error counter and the PCS must measure the same population or bring-up
+     * ends up rejecting a link the BER tester says is perfect. */
+    unsigned scoring;
+    /* DECISION-DIRECTED: run exactly as the link will in traffic.
+     *
+     * 0 = data-aided. The LMS error and the DFE feedback both come from the
+     *     KNOWN training symbol. Feedback is perfect and no error propagates,
+     *     which is what lets the taps converge while the eye is still closed.
+     * 1 = decision-directed. Both come from the receiver's own decision, which
+     *     is all it has once traffic starts.
+     *
+     * These are not interchangeable and the gap is not small. A solution that
+     * looks flawless with oracle feedback can collapse the moment the DFE
+     * starts feeding back its own mistakes: measured at 12 dB, zero errors
+     * data-aided and 7.7e-2 decision-directed, a factor of a thousand.
+     *
+     * `scoring` is INDEPENDENT of this, and that independence is the point.
+     * Verification sets dd=1 so the loop behaves exactly as it will in
+     * traffic, while still scoring against the known pattern -- the only
+     * configuration in which a pre-traffic measurement predicts the
+     * post-traffic one. */
+    unsigned dd;
 } eq_t;
 
 void eq_init(eq_t *e);

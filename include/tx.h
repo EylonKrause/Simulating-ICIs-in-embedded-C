@@ -47,6 +47,9 @@ void   pam4_bits (unsigned gray_sym, unsigned *b1, unsigned *b0);
 unsigned pam4_slice(real_t y);
 /* Bit errors between two Gray symbols (0, 1 or 2). */
 unsigned pam4_bit_errors(unsigned a, unsigned b);
+/* Inverse of pam4_bits(): the 2-bit Gray word back to a level index. The FEC
+ * layer hands down raw 2-bit values and needs the level they select. */
+unsigned pam4_sym_from_gray(unsigned gray);
 
 /* ---- TX FFE ------------------------------------------------------------- */
 #define TX_FFE_TAPS 3u
@@ -74,6 +77,9 @@ void   tx_init(tx_t *tx, uint32_t seed, real_t pre, real_t post);
 /* Produce one symbol: returns the pre-distorted level and reports the Gray
  * symbol that was sent, so the receiver can be scored against it. */
 real_t tx_step(tx_t *tx, unsigned *sym_out);
+/* Same, but the symbol comes from somewhere else -- the PCS, once the link is
+ * carrying FEC-encoded traffic instead of the PRBS training pattern. */
+real_t tx_step_sym(tx_t *tx, unsigned sym);
 
 /* Render one symbol as OSR samples of a held rectangle (the DAC output). */
 void   tx_upsample(real_t level, real_t *dst);
