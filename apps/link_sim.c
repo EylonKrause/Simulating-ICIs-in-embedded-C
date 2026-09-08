@@ -50,6 +50,12 @@ int main(int argc, char **argv)
            RS_N, RS_K, noise);
     printf("=========================================================\n\n");
 
+    /* Platform init: reset the register file once, before anything reads or
+     * writes it. On silicon this is the reset controller's job and it happens
+     * before firmware runs; here the application stands in for it. Firmware
+     * must not do this itself -- see the note in fw_init(). */
+    hal_reset_all();
+
     hw_lane_t hw;
     if (hw_lane_init(&hw, il, mode, ppm) != 0) {
         fprintf(stderr, "hw_lane_init failed\n");

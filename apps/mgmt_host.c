@@ -129,6 +129,9 @@ int main(int argc, char **argv)
     const double il  = (argc > 1) ? atof(argv[1]) : 20.0;
     const double ppm = (argc > 2) ? atof(argv[2]) : 120.0;
 
+    /* Platform init: reset the register file before anything touches it. */
+    hal_reset_all();
+
     hw_lane_t hw;
     if (hw_lane_init(&hw, il, AFE_ELECTRICAL, ppm) != 0) {
         return 1;

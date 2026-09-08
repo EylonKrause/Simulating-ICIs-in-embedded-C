@@ -225,9 +225,25 @@ static void fw_set_front_end(fw_link_t *L)
 
 void fw_init(fw_link_t *L)
 {
+    /* Firmware state only. It does NOT reset the register file.
+     *
+     * It used to, and that was the wrong layer twice over. The whole-file
+     * reset entry point is declared in hal.h under "for the hardware model and
+     * for tests -- firmware must never call these", so this was the control
+     * plane reaching around its own interface. On silicon the register file is
+     * reset by the reset controller before firmware runs at all, and no such
+     * call is available to it.
+     *
+     * It was also a latent multi-lane bug: that reset clears EVERY lane's
+     * aperture, so a supervisor initialising eight lanes in turn wiped lanes 0
+     * through 6 while setting up lane 7. Benign only because this function
+     * writes no configuration -- the first tick of LS_RESET does that -- which
+     * is a thin reason for it to have been correct.
+     *
+     * The platform resets the register file once now, before any lane's
+     * firmware is initialised. CI greps this directory to keep it that way. */
     memset(L, 0, sizeof(*L));
     L->backoff_ms = 2u;
-    hal_reset_all();
     enter(L, LS_RESET);
 }
 

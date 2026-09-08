@@ -32,7 +32,7 @@ jobs:
       # rather than repeating it in a header.
       - name: Firmware never calls the hardware-side backend
         run: |
-          if grep -nE 'hw_reg_set|hw_reg_get|hw_status_set|hw_lane_|hw_macro_' src/fw_*.c; then
+          if grep -nE 'hw_reg_set|hw_reg_get|hw_status_set|hw_lane_|hw_macro_|hal_reset_all' src/fw_*.c; then
             echo "::error::a fw_*.c file reached around the register interface"
             exit 1
           fi
