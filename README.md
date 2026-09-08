@@ -30,7 +30,7 @@ vendor's silicon and contains nothing proprietary.
 | Equaliser tap adaptation | [`src/fw_adapt.c`](src/fw_adapt.c) -- sign-sign LMS supervisor, gear shifting, leakage |
 | Gain control (VGA and TIA) | [`src/fw_agc.c`](src/fw_agc.c) -- AGC with the VGA-to-TIA handoff |
 | Forward error correction | [`src/fec.c`](src/fec.c), [`src/pcs.c`](src/pcs.c) -- RS(544,514) KP4, codeword framing, BER scoring |
-| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 150 checks |
+| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 158 checks |
 | Fixed-point arithmetic | [`include/fixed.h`](include/fixed.h) -- Q-format, saturation, accumulate-wide/apply-narrow |
 
 **No `fw_*.c` file contains a single floating-point operation, and none of them
@@ -81,7 +81,7 @@ that substitution is the whole reason the tests can run without silicon.
 Needs only MSVC Build Tools (or any C17 compiler).
 
 ```bat
-build.bat test_all                     :: 150 unit tests, no hardware
+build.bat test_all                     :: 158 unit tests, no hardware
 build.bat ch_probe 20                  :: channel synthesis, checked against its own model
 build.bat ch_probe ..\data\pkg_backplane.s4p    :: the same, from S-parameters
 build.bat cdr_probe 20 -80             :: CDR loop in isolation, instrumented
@@ -167,7 +167,7 @@ A clean run, 12 dB and -80 ppm, first attempt:
   HAL access audit    15 read-modify-writes, 0 unguarded, 0 W1C bugs
 ```
 
-`150 checks, 0 failures`, and the same under AddressSanitizer.
+`158 checks, 0 failures`, and the same under AddressSanitizer.
 
 **The interesting runs are the ones that do not go like that.** At 16 dB and
 -200 ppm the search takes six attempts before it finds a workable front end,
@@ -447,6 +447,7 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | The most-commented feature in the macro was arithmetically inert | Twenty lines explaining that a supervisor servicing 2 of 8 lanes divides every control loop's bandwidth by four -- attached to code where `service` was assigned `n_lanes`, making the scale factor identically 1 and `MACRO_SERVICE` unreferenced. The mechanism was real and the explanation was right; it was simply never exercised. Now a parameter, with the eight-lane case runnable both ways. |
 | `channel_pulse_response()` used the streaming convolution | So a single-shot measurement started from whatever inter-block state the channel was carrying, and then left its own tail behind for the next real block. `hw_lane_init()` calls it to seed the training-reference delay, so the pollution landed on the first block of every link. |
 | A metric that could not fail, still printing after being "replaced" | The README said the vacuous pre-FEC counter had been replaced by a real measurement. The real measurement was added; the old one was left in, still printing a confident `0.000e+00` two lines below it. Removed, and the telemetry field with it, because a number that cannot be non-zero is worse than no number -- it gets trusted. |
+| The Touchstone reader trusted the file | A duplicated frequency row -- routine in a stitched or concatenated sweep -- makes the interpolation divide by exactly zero, and the resulting NaN propagates into every tap of the impulse response and from there into every sample, BER and lock decision. There was not one finiteness check anywhere in the project, so the run completed and printed numbers. A stray non-numeric token was worse: the parser abandoned the rest of the line but kept its partial record, so everything after it shifted by one field and what had been an imaginary part became the next point's frequency. It still returned success. All of it is external input and it is now validated, with tests that feed the parser each malformation. |
 
 ## Telemetry over a management bus
 

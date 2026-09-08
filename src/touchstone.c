@@ -147,7 +147,29 @@ int ts_load(touchstone_t *ts, const char *path, unsigned ports)
             char *end = NULL;
             const double v = strtod(p, &end);
             if (end == p) {
-                break;              /* not a number; skip the rest of the line */
+                /* Not a number. If we are PART WAY through a record, this is
+                 * not something to skip past: records accumulate across lines
+                 * with no framing of their own, so abandoning the rest of the
+                 * line while keeping the partial count shifts every subsequent
+                 * value by one. What was S21's imaginary part becomes the next
+                 * point's frequency, the file still parses, and every number
+                 * that comes out of it is wrong. Fail loudly instead. */
+                if (have != 0u) {
+                    ts_fail("stray non-numeric field inside a data record");
+                    fclose(fp);
+                    free(nums);
+                    ts_free(ts);
+                    return -1;
+                }
+                break;              /* between records: skip the rest of line */
+            }
+            if (!isfinite(v)) {
+                /* strtod happily accepts the literal tokens "nan" and "inf". */
+                ts_fail("non-finite value in the data");
+                fclose(fp);
+                free(nums);
+                ts_free(ts);
+                return -1;
             }
             p = end;
 
@@ -186,10 +208,41 @@ int ts_load(touchstone_t *ts, const char *path, unsigned ports)
     fclose(fp);
     free(nums);
 
+    if (have != 0u) {
+        /* A record that ran out of file. Dropping it silently would hand back
+         * a shorter sweep than the file claims to contain. */
+        ts_fail("truncated final record");
+        ts_free(ts);
+        return -1;
+    }
     if (npt < 2u) {
         ts_fail("fewer than two frequency points");
         ts_free(ts);
         return -1;
+    }
+
+    /* THE FREQUENCY AXIS IS INTERPOLATED AGAINST, SO IT HAS TO BE SANE.
+     *
+     * channel.c divides by the width of the bracketing interval. A duplicated
+     * frequency row -- routine in sweeps that have been stitched or
+     * concatenated -- makes that denominator exactly zero, the interpolation
+     * weight becomes 0.0/0.0, and the NaN propagates into every tap of the
+     * impulse response and from there into every sample, BER and lock decision
+     * in the simulation. Nothing downstream checks for it, so the run completes
+     * and prints numbers.
+     *
+     * A file is external input. Three cheap conditions close it. */
+    for (size_t k = 0; k < npt; ++k) {
+        if (!isfinite(ts->f_hz[k]) || ts->f_hz[k] <= 0.0) {
+            ts_fail("frequency is not finite and positive");
+            ts_free(ts);
+            return -1;
+        }
+        if (k > 0u && ts->f_hz[k] <= ts->f_hz[k - 1u]) {
+            ts_fail("frequencies are not strictly increasing");
+            ts_free(ts);
+            return -1;
+        }
     }
 
     ts->ports = ports;

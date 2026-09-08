@@ -575,6 +575,75 @@ static void test_touchstone(void)
           "a missing file fails rather than returning garbage");
 }
 
+
+/* Write a 2-port Touchstone file whose data lines are supplied verbatim, so a
+ * test can hand the parser exactly the malformation it wants to check. */
+static int write_s2p(const char *path, const char *body)
+{
+    FILE *fp = fopen(path, "w");
+    if (fp == NULL) {
+        return -1;
+    }
+    fputs("# MHZ S MA R 50\n", fp);
+    fputs(body, fp);
+    fclose(fp);
+    return 0;
+}
+
+/* A Touchstone file is EXTERNAL INPUT. These are the malformations that occur
+ * in practice -- stitched sweeps with a duplicated row, a tool that emitted a
+ * literal nan, a transfer that truncated the last record -- and every one of
+ * them used to load with return 0 and put NaN or misframed data into every tap
+ * of the impulse response, which nothing downstream checks for. */
+static void test_touchstone_rejects_bad_input(void)
+{
+    printf("\nTouchstone reader treats the file as untrusted\n");
+    const char *path = "test_bad.s2p";
+    touchstone_t ts;
+
+    CHECK(write_s2p(path,
+          "1000  0.1 0  0.9 -10  0.9 -10  0.1 0\n"
+          "1000  0.2 0  0.8 -20  0.8 -20  0.2 0\n") == 0, "wrote a fixture");
+    CHECK(ts_load(&ts, path, 0u) != 0,
+          "a DUPLICATED frequency row is rejected (it would divide by zero)");
+
+    (void)write_s2p(path,
+          "2000  0.1 0  0.9 -10  0.9 -10  0.1 0\n"
+          "1000  0.2 0  0.8 -20  0.8 -20  0.2 0\n");
+    CHECK(ts_load(&ts, path, 0u) != 0, "a DESCENDING frequency row is rejected");
+
+    (void)write_s2p(path,
+          "1000  0.1 0  0.9 -10  0.9 -10  0.1 0\n"
+          "2000  nan 0  0.8 -20  0.8 -20  0.2 0\n");
+    CHECK(ts_load(&ts, path, 0u) != 0,
+          "a literal nan is rejected rather than propagated into every tap");
+
+    (void)write_s2p(path,
+          "1000  0.1 0  0.9 -10  0.9 -10  0.1 0\n"
+          "2000  0.2 0  0.8 -20  0.8 -20  0.2 0\n"
+          "3000  0.3 0  0.7\n");
+    CHECK(ts_load(&ts, path, 0u) != 0, "a TRUNCATED final record is rejected");
+
+    (void)write_s2p(path,
+          "1000  0.1 0  0.9 -10  0.9 -10  0.1 0\n"
+          "2000  0.2 0  oops -20  0.8 -20  0.2 0\n");
+    CHECK(ts_load(&ts, path, 0u) != 0,
+          "a stray token INSIDE a record is rejected, not skipped past");
+
+    /* And the well-formed case still loads, so none of the above is just a
+     * parser that now refuses everything. */
+    (void)write_s2p(path,
+          "1000  0.1 0  0.9 -10  0.9 -10  0.1 0\n"
+          "2000  0.2 0  0.8 -20  0.8 -20  0.2 0\n");
+    const int rc = ts_load(&ts, path, 0u);
+    CHECK(rc == 0, "a well-formed file still loads");
+    if (rc == 0) {
+        CHECK(ts.n == 2u, "with the right number of points");
+        ts_free(&ts);
+    }
+    remove(path);
+}
+
 /* ---- the channel carries memory across blocks ---------------------------- */
 static void test_channel_streaming(void)
 {
@@ -1086,6 +1155,7 @@ int main(void)
     test_convolution();
     test_channel_streaming();
     test_touchstone();
+    test_touchstone_rejects_bad_input();
     test_cdr_lock_detector();
     test_lane_window();
     test_deadline_wrap();
