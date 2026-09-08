@@ -520,13 +520,33 @@ firmware: it hunts for framing byte by byte, validates every CRC, tracks
 sequence gaps, and reassembles the eye from chunks.
 
 ```
+  link UP after 2112 ms
   frames ok / bad     199 / 0
   sequence gaps       0
   bytes dropped by HW 0
   counters            745108 symbols, up in 2112 ms, 62 faults
-  FFE taps              -1   +0   -3  +19   -3   -1   -1   -1
+  counters non-zero   yes
+  FFE taps            +1  -1  +4  -7 +32 +14 -10  -2  -2  -1  -1  -1  -1  +0  +0  +0
   eye reassembled     768/768 bytes (32 x 24)
 ```
+
+Two of those lines are there because of bugs they used to hide.
+
+**`counters non-zero`** is a check, not a statistic. That frame reported 0
+symbols and 0 errors for the life of the project: it read two read-and-clear
+registers that the bring-up code and the AGC had already drained, which is the
+one-consumer rule this project has a comment about twelve lines above the
+offending call. A host that cannot tell "the link sent zero symbols" from "the
+counter was already emptied" is not receiving telemetry, it is receiving
+zeroes. Asserting the field can be non-zero is the cheapest possible guard
+against that returning.
+
+**62 faults** looks alarming and is correct. Bring-up here refuses to declare
+the link up until it has measured its own error rate decision-directed, and at
+this operating point it takes many attempts to find a front end that passes.
+The number was much smaller before -- because this binary was running
+verification in the wrong datapath mode, where no errors are counted and the
+check passed unconditionally.
 
 Four things that only matter once the bus is real:
 
