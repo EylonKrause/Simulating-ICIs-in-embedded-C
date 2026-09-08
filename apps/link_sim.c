@@ -250,6 +250,8 @@ int main(int argc, char **argv)
            hs->unguarded_rmw ? "<-- BUG: RMW with no critical section" : "(ok)");
     printf("    W1C RMW bugs        %llu   %s\n", (unsigned long long)hs->w1c_rmw_bugs,
            hs->w1c_rmw_bugs ? "<-- BUG: read-modify-wrote a W1C register" : "(ok)");
+    printf("    unmapped accesses   %llu   %s\n", (unsigned long long)hs->unmapped,
+           hs->unmapped ? "<-- BUG: an address silicon would fault on" : "(ok)");
 
     /* ---- eye diagram ---------------------------------------------------- */
     printf("\n  eye at the slicer input (%llu samples)\n", (unsigned long long)eye.hits);
@@ -288,7 +290,7 @@ int main(int argc, char **argv)
     const int up      = fw_is_up(&fw);
     const int decoded = (pcs->codewords > 0u) && (pcs->uncorrectable == 0u);
     const int clean   = (hs->unguarded_rmw == 0u) && (hs->w1c_rmw_bugs == 0u) &&
-                        (mgmt_bus_dropped() == 0u);
+                        (hs->unmapped == 0u) && (mgmt_bus_dropped() == 0u);
 
     printf("\n  PASS CRITERIA\n");
     printf("    link up             %s\n", up      ? "yes" : "NO");

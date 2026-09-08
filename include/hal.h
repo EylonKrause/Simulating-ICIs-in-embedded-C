@@ -69,6 +69,19 @@
 #define REG_EYE_DATA       0x114u   /* RO  byte at REG_EYE_ADDR              */
 #define REG_CDR_CTRL       0x118u   /* RW  [5:0] timing-detector h1 target   */
 
+/* The highest mapped offset in a lane aperture. Every 4-byte offset from 0x000
+ * to here is a real register, so "is this address mapped" is a comparison
+ * rather than a table -- ADD A REGISTER AND THIS MOVES WITH IT.
+ *
+ * It exists because the model is otherwise MORE FORGIVING THAN SILICON, which
+ * is the wrong direction for a model to err in. An access past the aperture
+ * folds back into it (see idx_of), and a misaligned one is silently rounded
+ * down; on a real part the first reaches a neighbouring lane or an unmapped
+ * address and the second is a bus fault. Firmware that computed a bad offset
+ * would therefore pass here and fault on the part. The accesses are counted
+ * instead, so the model reports what the hardware would refuse. */
+#define REG_LAST           0x118u
+
 /* ---- CTRL ---------------------------------------------------------------- */
 #define CTRL_EN            (1u << 0)
 #define CTRL_TX_EN         (1u << 1)
@@ -247,6 +260,7 @@ typedef struct {
     uint64_t rmw;
     uint64_t unguarded_rmw;   /* RMW performed with no critical section held */
     uint64_t w1c_rmw_bugs;    /* a RMW that touched a W1C register           */
+    uint64_t unmapped;        /* access past REG_LAST, or not 4-byte aligned */
 } hal_stats_t;
 
 const hal_stats_t *hal_stats(void);

@@ -55,10 +55,24 @@ unsigned hal_current_lane(void) { return g_lane; }
 
 static size_t idx_of(uint32_t off)
 {
+    /* An offset that is past the end of the map, or not word aligned, is a
+     * firmware bug. This model cannot fault on it the way a bus would, and
+     * folding it silently is the one way a model can be WORSE than useless:
+     * it makes a class of bug that is fatal on silicon invisible on the
+     * bench. So it is counted, and the tests assert the count is zero.
+     *
+     * Note this catches a bad ADDRESS, not a bad INDEX. REG_FFE_TAP(20)
+     * lands on a real DFE tap register and no address check can see that;
+     * only a bounds check at the caller can, which is why the tap loops are
+     * written against NUM_FFE_TAPS rather than a literal. */
+    if ((off > REG_LAST) || ((off & 3u) != 0u)) {
+        g_stats.unmapped++;
+    }
+
     /* Mask to the aperture, then add the selected lane's base. An offset that
-     * already carries a LANE_BASE(n) is therefore harmless -- it folds back to
-     * the same register within the selected lane rather than reaching into a
-     * neighbour by accident. */
+     * already carries a LANE_BASE(n) therefore folds back to the same register
+     * within the selected lane rather than reaching into a neighbour by
+     * accident -- memory-safe, and counted above. */
     return (size_t)(g_lane) * REG_PER_LANE +
            (size_t)((off & (REG_SPACE_BYTES - 1u)) >> 2);
 }

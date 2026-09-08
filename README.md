@@ -30,7 +30,7 @@ vendor's silicon and contains nothing proprietary.
 | Equaliser tap adaptation | [`src/fw_adapt.c`](src/fw_adapt.c) -- sign-sign LMS supervisor, gear shifting, leakage |
 | Gain control (VGA and TIA) | [`src/fw_agc.c`](src/fw_agc.c) -- AGC with the VGA-to-TIA handoff |
 | Forward error correction | [`src/fec.c`](src/fec.c), [`src/pcs.c`](src/pcs.c) -- RS(544,514) KP4, codeword framing, BER scoring |
-| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 158 checks |
+| Unit tests, no hardware required | [`tests/test_all.c`](tests/test_all.c) -- 162 checks |
 | Fixed-point arithmetic | [`include/fixed.h`](include/fixed.h) -- Q-format, saturation, accumulate-wide/apply-narrow |
 
 **No `fw_*.c` file contains a single floating-point operation, and none of them
@@ -45,7 +45,7 @@ ever pointed at it. A claim that lives only in a header is a claim that drifts.
 decodes, and the bus audit is clean -- and `macro_sim` additionally fails if
 the supervisor's round robin drifts by more than one service between lanes.
 This matters because for most of this project's history the unit tests were
-green while the receiver did not work: 158 checks of loops and registers say
+green while the receiver did not work: 162 checks of loops and registers say
 nothing about whether the thing at the end of them recovers data.
 
 ## Architecture
@@ -90,7 +90,7 @@ that substitution is the whole reason the tests can run without silicon.
 Needs only MSVC Build Tools (or any C17 compiler).
 
 ```bat
-build.bat test_all                     :: 158 unit tests, no hardware
+build.bat test_all                     :: 162 unit tests, no hardware
 build.bat ch_probe 20                  :: channel synthesis, checked against its own model
 build.bat ch_probe ..\data\pkg_backplane.s4p    :: the same, from S-parameters
 build.bat cdr_probe 20 -80             :: CDR loop in isolation, instrumented
@@ -176,7 +176,7 @@ A clean run, 12 dB and -80 ppm, first attempt:
   HAL access audit    15 read-modify-writes, 0 unguarded, 0 W1C bugs
 ```
 
-`158 checks, 0 failures`, and the same under AddressSanitizer.
+`162 checks, 0 failures`, and the same under AddressSanitizer.
 
 **The interesting runs are the ones that do not go like that.** At 16 dB and
 -200 ppm the search takes six attempts before it finds a workable front end,
@@ -456,6 +456,7 @@ fix. Every one of these was found by instrumenting, not by reasoning.
 | Every crosstalk aggressor shared one overlap-add tail | The crosstalk filter carries state between blocks, and that state lived on the *victim's* channel. Running three neighbours through it in turn meant the residue left by neighbour -3 at the end of a block was emitted at the start of the next one scaled by neighbour +1's coupling weight. Superposition *inside* a block was exact; only the boundary term was wrong -- which no BER number would ever show. Fixed by using linearity: sum the aggressors' waveforms first and filter once, which is the same arithmetic with one state variable instead of N, and one FFT pass instead of N. |
 | The most-commented feature in the macro was arithmetically inert | Twenty lines explaining that a supervisor servicing 2 of 8 lanes divides every control loop's bandwidth by four -- attached to code where `service` was assigned `n_lanes`, making the scale factor identically 1 and `MACRO_SERVICE` unreferenced. The mechanism was real and the explanation was right; it was simply never exercised. Now a parameter, with the eight-lane case runnable both ways. |
 | `channel_pulse_response()` used the streaming convolution | So a single-shot measurement started from whatever inter-block state the channel was carrying, and then left its own tail behind for the next real block. `hw_lane_init()` calls it to seed the training-reference delay, so the pollution landed on the first block of every link. |
+| The register model was quietly more forgiving than the silicon it stands in for | An offset past the end of the aperture folded back into it and a misaligned one was rounded down, both silently. On a real part the first reaches a neighbouring lane or an unmapped address and the second is a bus fault, so firmware that computed a bad address would pass every test here and fault on the bench. Nothing was doing it -- the counter reads zero across the full link and macro runs -- which is the point: the check is worth having *because* it currently passes, and a model that errs toward permissive hides exactly the class of bug it exists to catch. Counted now, asserted in the tests and in both end-to-end gates. |
 | A metric that could not fail, still printing after being "replaced" | The README said the vacuous pre-FEC counter had been replaced by a real measurement. The real measurement was added; the old one was left in, still printing a confident `0.000e+00` two lines below it. Removed, and the telemetry field with it, because a number that cannot be non-zero is worse than no number -- it gets trusted. |
 | The Touchstone reader trusted the file | A duplicated frequency row -- routine in a stitched or concatenated sweep -- makes the interpolation divide by exactly zero, and the resulting NaN propagates into every tap of the impulse response and from there into every sample, BER and lock decision. There was not one finiteness check anywhere in the project, so the run completed and printed numbers. A stray non-numeric token was worse: the parser abandoned the rest of the line but kept its partial record, so everything after it shifted by one field and what had been an imaginary part became the next point's frequency. It still returned success. All of it is external input and it is now validated, with tests that feed the parser each malformation. |
 

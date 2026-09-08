@@ -230,6 +230,8 @@ int main(int argc, char **argv)
            hs->unguarded_rmw ? "<-- BUG" : "(ok)");
     printf("    W1C RMW bugs        %llu   %s\n", (unsigned long long)hs->w1c_rmw_bugs,
            hs->w1c_rmw_bugs ? "<-- BUG" : "(ok)");
+    printf("    unmapped accesses   %llu   %s\n", (unsigned long long)hs->unmapped,
+           hs->unmapped ? "<-- BUG: an address silicon would fault on" : "(ok)");
     printf("    lane window depth   %u   %s\n", hal_current_lane(),
            "(last selected)");
     printf("    supervisor services ");
@@ -268,7 +270,7 @@ int main(int argc, char **argv)
     const int fair   = ((hi - lo) <= 1u);
     const int payload = (worst_uncorr == 0u);
     const int clean  = (hs->unguarded_rmw == 0u) && (hs->w1c_rmw_bugs == 0u) &&
-                       (mgmt_bus_dropped() == 0u);
+                       (hs->unmapped == 0u) && (mgmt_bus_dropped() == 0u);
 
     printf("\n  PASS CRITERIA\n");
     printf("    all %u lanes up      %s\n", lanes, all_up  ? "yes" : "NO");

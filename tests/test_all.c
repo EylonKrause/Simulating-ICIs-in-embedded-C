@@ -799,14 +799,36 @@ static void test_lane_window(void)
           "LANE_ID reports which aperture is selected");
 
     /* An offset that already carries LANE_BASE(n) must fold back into the
-     * selected window rather than escaping into a neighbour. */
+     * selected window rather than escaping into a neighbour -- and the model
+     * must SAY SO, because on silicon that address is a different lane or an
+     * unmapped hole, not a fold. A model that is quietly more permissive than
+     * the hardware hides exactly the bugs it exists to catch. */
     hal_select_lane(5u);
+    hal_stats_reset();
     hal_write32(LANE_BASE(2u) + REG_CTRL, 0x1234u);
     CHECK(hal_read32(REG_CTRL) == 0x1234u,
           "an offset with a stale LANE_BASE folds into the selected window");
+    CHECK(hal_stats()->unmapped == 1u,
+          "and the access is COUNTED, because silicon would not have folded it");
     hal_select_lane(2u);
     CHECK(hal_read32(REG_CTRL) != 0x1234u,
           "and does not reach the lane whose base it carried");
+
+    hal_stats_reset();
+    (void)hal_read32(REG_CDR_CTRL + 2u);
+    CHECK(hal_stats()->unmapped == 1u,
+          "a misaligned offset is counted too -- that is a bus fault on a part");
+    hal_stats_reset();
+    (void)hal_read32(REG_LAST + 4u);
+    CHECK(hal_stats()->unmapped == 1u, "so is an offset past the end of the map");
+
+    hal_stats_reset();
+    for (unsigned i = 0; i < NUM_FFE_TAPS; ++i) { (void)hal_read32(REG_FFE_TAP(i)); }
+    for (unsigned i = 0; i < NUM_DFE_TAPS; ++i) { (void)hal_read32(REG_DFE_TAP(i)); }
+    (void)hal_read32(REG_LANE_ID);
+    (void)hal_read32(REG_LAST);
+    CHECK(hal_stats()->unmapped == 0u,
+          "and every real register in the map reads clean, including the last");
 
     /* The hazard: an ISR that repoints the window must not corrupt the
      * interrupted lane's accesses. */
